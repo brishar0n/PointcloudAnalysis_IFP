@@ -43,12 +43,12 @@ python3 run_preprocessing.py datasets/vilnius_subsampled.laz -o preprocessed/vil
 
 The pipeline runs six steps in order:
 
-1. **Load** — Reads the .LAZ file, normalises field names, auto-detects and shifts absolute coordinates (e.g. Vilnius).
-2. **Subsample** (optional) — Voxel-grid downsampling to reduce point count for faster iteration.
-3. **Compute geometric features** — Eigenvalues, roughness, planarity, linearity, height-above-ground, point density. Skips computation for datasets that already have IFP-precomputed values.
-4. **Remove noise** — Filters statistical outliers based on local point density.
-5. **High/low split** — Separates street-level points (sidewalks, roads, cars, furniture) from elevated points (buildings, tree canopies) using a height threshold.
-6. **Prepare training data** — Exports two formats for the classifier:
+1. **Load**: Reads the .LAZ file, normalises field names, auto-detects and shifts absolute coordinates (e.g. Vilnius).
+2. **Subsample** (optional): Voxel-grid downsampling to reduce point count for faster iteration.
+3. **Compute geometric features**: Eigenvalues, roughness, planarity, linearity, height-above-ground, point density. Skips computation for datasets that already have IFP-precomputed values.
+4. **Remove noise**: Filters statistical outliers based on local point density.
+5. **High/low split**: Separates street-level points (sidewalks, roads, cars, furniture) from elevated points (buildings, tree canopies) using a height threshold.
+6. **Prepare training data**: Exports two formats for the classifier:
    - Flat arrays (`train_data_flat.npz`) for traditional ML (k-means, random forest)
    - Spatial blocks (`train_data_blocks.npz`) for deep learning (PointNet, RandLA-Net)
 
@@ -104,14 +104,14 @@ For each point, the following scalar fields are computed (or derived from precom
 - `roughness_{r}` — distance from point to local best-fit plane
 
 **Height features:**
-- `height_above_min` — Z minus lowest Z in local neighbourhood
-- `height_range` — max Z − min Z in neighbourhood
-- `height_std` — standard deviation of Z in neighbourhood
-- `normalized_z` — Z normalised globally to [0, 1]
+- `height_above_min`: Z minus lowest Z in local neighbourhood
+- `height_range`: max Z − min Z in neighbourhood
+- `height_std`: standard deviation of Z in neighbourhood
+- `normalized_z`: Z normalised globally to [0, 1]
 
 **Other:**
-- `density` — neighbour count within radius
-- `intensity_normalized` — laser intensity normalised to [0, 1]
+- `density`: neighbour count within radius
+- `intensity_normalized`: laser intensity normalised to [0, 1]
 
 ## Using the module in Python
 
