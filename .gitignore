@@ -1,5 +1,0 @@
-*.laz
-*.las
-preprocessed/
-__pycache__/
-*.npz
