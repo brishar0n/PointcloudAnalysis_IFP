@@ -1,5 +1,7 @@
 # Preprocessing Module (`feature/pointcloud-loader`)
 
+PIC: Brigitte
+
 Loads LiDAR point cloud data (.LAZ/.LAS), computes geometric features, and prepares training datasets for the sidewalk classifier.
 
 This is the first stage of the Sidewalk Scanner pipeline — everything downstream (classification, boundary extraction, width metrics, visualisation) depends on the outputs from this module.
