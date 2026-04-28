@@ -3,17 +3,23 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import re
-import numpy as np
+
 import laspy
+import numpy as np
 
 
-# Baseline sidewalk candidate extraction.
-# This is not the final boundary extraction yet.
-# It filters likely sidewalk/ground points using preprocessed geometric features.
 
+# Sidewalk candidate extraction / boundary extraction baseline.
+# Input comes from the preprocessing module:
+#   preprocessed/<city>/low_featured.laz
+#
+# This file already contains street-level points and geometric features
+# such as height, planarity, roughness, density, and eigenvalue-derived fields.
+#
+# This script filters likely sidewalk candidate points and saves them
+# for later boundary/width analysis.
 
 def normalize_name(name: str) -> str:
-    """Make field names easier to match."""
     s = name.strip().lower()
     s = s.replace("(", "_").replace(")", "")
     s = s.replace(".", "_")
@@ -34,7 +40,7 @@ def build_name_map(las: laspy.LasData) -> dict[str, str]:
 def get_field(
     las: laspy.LasData,
     name_map: dict[str, str],
-    candidates: list[str]
+    candidates: list[str],
 ) -> np.ndarray | None:
     for candidate in candidates:
         if candidate in name_map:
@@ -45,9 +51,8 @@ def get_field(
 def get_planarity(
     las: laspy.LasData,
     name_map: dict[str, str],
-    radius: str
+    radius: str,
 ) -> np.ndarray | None:
-    # Try direct planarity first
     planarity = get_field(las, name_map, [
         f"planarity_{radius}",
         f"planarity_{radius}m",
@@ -56,7 +61,6 @@ def get_planarity(
     if planarity is not None:
         return planarity.astype(np.float32)
 
-    # If not available, calculate from eigenvalues
     eig1 = get_field(las, name_map, [
         f"eigenvalue_1_{radius}",
         f"1st_eigenvalue_{radius}",
@@ -84,7 +88,7 @@ def get_planarity(
 def get_roughness(
     las: laspy.LasData,
     name_map: dict[str, str],
-    radius: str
+    radius: str,
 ) -> np.ndarray | None:
     roughness = get_field(las, name_map, [
         f"roughness_{radius}",
@@ -99,9 +103,8 @@ def get_roughness(
 
 def get_height_feature(
     las: laspy.LasData,
-    name_map: dict[str, str]
+    name_map: dict[str, str],
 ) -> np.ndarray:
-    # Prefer preprocessed height fields when available
     height = get_field(las, name_map, [
         "height_above_min",
         "height_division",
@@ -115,40 +118,32 @@ def get_height_feature(
     return height.astype(np.float32)
 
 
-def get_classification_mask(
+def clean_feature(feature: np.ndarray, fill_value: float) -> np.ndarray:
+    # Handles NaN/inf values so filtering does not behave weirdly
+    return np.nan_to_num(
+        feature,
+        nan=fill_value,
+        posinf=fill_value,
+        neginf=fill_value,
+    ).astype(np.float32)
+
+
+def get_classifier_mask(
     las: laspy.LasData,
-    allowed_classes: list[int] | None
+    use_classifier: bool,
+    sidewalk_label: int,
 ) -> np.ndarray:
-    if allowed_classes is None:
+    if not use_classifier:
         return np.ones(len(las.points), dtype=bool)
 
-    classes = np.asarray(las.classification)
-    return np.isin(classes, allowed_classes)
-
-
-def load_classifier_labels(label_file: str | None, expected_len: int) -> np.ndarray | None:
-    """
-    Optional classifier output support.
-    This allows the script to use Vency's output later if labels are saved as .npy.
-    """
-    if label_file is None:
-        return None
-
-    labels = np.load(label_file)
-
-    if len(labels) != expected_len:
-        raise ValueError(
-            f"Classifier label length does not match point cloud length. "
-            f"Labels: {len(labels)}, points: {expected_len}"
-        )
-
-    return labels
+    labels = np.asarray(las.classification)
+    return labels == sidewalk_label
 
 
 def save_filtered_cloud(
     las: laspy.LasData,
     mask: np.ndarray,
-    output_path: Path
+    output_path: Path,
 ) -> None:
     filtered = laspy.create(
         file_version=las.header.version,
@@ -165,7 +160,7 @@ def save_summary(
     height_threshold: float,
     kept: int,
     total: int,
-    used_classifier: bool
+    used_classifier: bool,
 ) -> None:
     summary_path = output_path.with_suffix(".txt")
 
@@ -175,12 +170,12 @@ def save_summary(
         f.write(f"Input file: {input_path}\n")
         f.write(f"Output file: {output_path}\n")
         f.write(f"Radius used: {args.radius}\n")
+        f.write(f"Used classifier labels: {used_classifier}\n")
+        f.write(f"Sidewalk label: {args.sidewalk_label}\n")
+        f.write(f"Height percentile: {args.height_max_percentile}\n")
+        f.write(f"Height threshold: {height_threshold:.4f}\n")
         f.write(f"Planarity minimum: {args.planarity_min}\n")
         f.write(f"Roughness maximum: {args.roughness_max}\n")
-        f.write(f"Height percentile: {args.height_max_percentile}\n")
-        f.write(f"Height threshold value: {height_threshold:.4f}\n")
-        f.write(f"Allowed LAS classes: {args.allowed_classes}\n")
-        f.write(f"Used classifier labels: {used_classifier}\n")
         f.write(f"Points kept: {kept} / {total} ({100 * kept / total:.2f}%)\n")
 
 
@@ -191,53 +186,46 @@ def main() -> None:
 
     parser.add_argument(
         "input",
-        help="Path to feature-enriched LAZ/LAS file"
+        help="Path to feature-enriched or classified LAZ/LAS file",
     )
     parser.add_argument(
         "--output", "-o",
         default="outputs/sidewalk_candidates.laz",
-        help="Output LAZ path"
+        help="Output LAZ path",
     )
     parser.add_argument(
         "--radius",
         default="0.1",
-        help="Feature radius to use, e.g. 0.1, 0.3, 0.5"
+        help="Feature radius to use, e.g. 0.1, 0.3, 0.5",
     )
     parser.add_argument(
         "--planarity-min",
         type=float,
         default=0.35,
-        help="Minimum planarity threshold"
+        help="Minimum planarity threshold",
     )
     parser.add_argument(
         "--roughness-max",
         type=float,
         default=0.06,
-        help="Maximum roughness threshold"
+        help="Maximum roughness threshold",
     )
     parser.add_argument(
         "--height-max-percentile",
         type=float,
         default=65.0,
-        help="Keep points below this height percentile"
+        help="Keep points below this height percentile",
     )
     parser.add_argument(
-        "--allowed-classes",
-        nargs="+",
-        type=int,
-        default=None,
-        help="Optional LAS classification labels to keep before filtering"
-    )
-    parser.add_argument(
-        "--classifier-labels",
-        default=None,
-        help="Optional .npy classifier output labels"
+        "--use-classifier",
+        action="store_true",
+        help="Use classification label to keep predicted sidewalk points first",
     )
     parser.add_argument(
         "--sidewalk-label",
         type=int,
-        default=None,
-        help="Optional classifier label value for sidewalk"
+        default=2,
+        help="Classification label for sidewalk. Current team format: 2 = sidewalk",
     )
 
     args = parser.parse_args()
@@ -249,14 +237,11 @@ def main() -> None:
     print(f"Loading: {input_path}")
     las = laspy.read(input_path)
 
-    raw_names = get_dimension_names(las)
     print("\nAvailable dimensions:")
-    for name in raw_names:
+    for name in get_dimension_names(las):
         print(f" - {name}")
 
     name_map = build_name_map(las)
-
-    # accept both 0.1 and 0_1 style input
     radius_key = args.radius.replace(".", "_")
 
     height = get_height_feature(las, name_map)
@@ -264,51 +249,46 @@ def main() -> None:
     roughness = get_roughness(las, name_map, radius_key)
 
     if planarity is None:
-        raise ValueError(
-            f"Could not find or derive planarity for radius '{args.radius}'."
-        )
+        raise ValueError(f"Could not find planarity for radius {args.radius}")
 
     if roughness is None:
+        raise ValueError(f"Could not find roughness for radius {args.radius}")
+
+    height = clean_feature(height, fill_value=np.nanmedian(height))
+    planarity = clean_feature(planarity, fill_value=0.0)
+    roughness = clean_feature(roughness, fill_value=np.nanmax(roughness))
+
+    classifier_mask = get_classifier_mask(
+        las,
+        use_classifier=args.use_classifier,
+        sidewalk_label=args.sidewalk_label,
+    )
+
+    if classifier_mask.sum() == 0:
         raise ValueError(
-            f"Could not find roughness for radius '{args.radius}'."
+            "No points matched the classifier sidewalk label. "
+            "Check the label value or input file."
         )
+
+    height_threshold = np.percentile(
+        height[classifier_mask],
+        args.height_max_percentile,
+    )
 
     print("\nFeature summary:")
     print(f" - height min/max: {height.min():.4f} / {height.max():.4f}")
     print(f" - planarity min/max: {planarity.min():.4f} / {planarity.max():.4f}")
     print(f" - roughness min/max: {roughness.min():.4f} / {roughness.max():.4f}")
 
-    # optional LAS class filtering
-    class_mask = get_classification_mask(las, args.allowed_classes)
-
-    # optional classifier output filtering
-    classifier_labels = load_classifier_labels(args.classifier_labels, len(las.points))
-    used_classifier = classifier_labels is not None and args.sidewalk_label is not None
-
-    if used_classifier:
-        classifier_mask = classifier_labels == args.sidewalk_label
-    else:
-        classifier_mask = np.ones(len(las.points), dtype=bool)
-
-    combined_base_mask = class_mask & classifier_mask
-
-    if combined_base_mask.sum() == 0:
-        raise ValueError("No points left after class/classifier filtering.")
-
-    height_threshold = np.percentile(
-        height[combined_base_mask],
-        args.height_max_percentile
-    )
-
     print("\nUsing thresholds:")
+    print(f" - classifier used = {args.use_classifier}")
+    print(f" - sidewalk label = {args.sidewalk_label}")
     print(f" - height <= percentile {args.height_max_percentile} -> {height_threshold:.4f}")
     print(f" - planarity >= {args.planarity_min}")
     print(f" - roughness <= {args.roughness_max}")
-    print(f" - allowed LAS classes = {args.allowed_classes}")
-    print(f" - classifier labels used = {used_classifier}")
 
     mask = (
-        combined_base_mask &
+        classifier_mask &
         (height <= height_threshold) &
         (planarity >= args.planarity_min) &
         (roughness <= args.roughness_max)
@@ -321,23 +301,23 @@ def main() -> None:
 
     save_filtered_cloud(las, mask, output_path)
     save_summary(
-        input_path,
-        output_path,
-        args,
-        height_threshold,
-        kept,
-        total,
-        used_classifier
+        input_path=input_path,
+        output_path=output_path,
+        args=args,
+        height_threshold=height_threshold,
+        kept=kept,
+        total=total,
+        used_classifier=args.use_classifier,
     )
 
     print(f"Saved sidewalk candidates -> {output_path.resolve()}")
     print(f"Saved summary -> {output_path.with_suffix('.txt').resolve()}")
 
     # TODO:
-    # - improve sidewalk vs road separation
-    # - add simple boundary/polyline extraction
-    # - connect properly with classifier output once format is confirmed
-    # - test thresholds across more cities
+    # - turn sidewalk candidates into actual boundary lines
+    # - improve road/sidewalk separation
+    # - test on more classified city outputs
+    # - pass boundary output to width metrics
 
 
 if __name__ == "__main__":
