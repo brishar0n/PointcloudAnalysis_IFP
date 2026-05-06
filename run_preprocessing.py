@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from preprocessing.loader import load_point_cloud, save_point_cloud, subsample
-from preprocessing.features import compute_all_features
+from preprocessing.features_query_method import compute_all_features
 from preprocessing.splitter import (
     split_high_low, remove_noise,
     prepare_training_data, prepare_training_blocks,
