@@ -29,12 +29,13 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 LABEL_THRESHOLD   = 0.01   # >1% non-zero -> city has ground truth labels
-CSF_CLOTH_SIZE    = 0.5    # cloth resolution in metres
+LABELLED_CITIES   = ["riga", "vilnius", "warsaw"]
+CSF_CLOTH_SIZE    = 1.0    # cloth resolution in metres
 CSF_MAX_ITER      = 500    # cloth simulation iterations
 CSF_CLASS_THRESH  = 0.3    # ground/non-ground distance threshold
 MIN_COMPONENT_PTS = 50     # min sidewalk patch size to keep
 
-def csf_ground_filter(xyz):
+def csf_ground_filter(xyz, cloth_size=CSF_CLOTH_SIZE):
     """
     Apply Cloth Simulation Filter (CSF) — the blanket method.
 
@@ -54,7 +55,7 @@ def csf_ground_filter(xyz):
 
     # Parameters tuned for urban street-level TLS scans
     csf.params.bSloopSmooth    = True   # smooth cloth on slopes
-    csf.params.cloth_resolution = CSF_CLOTH_SIZE
+    csf.params.cloth_resolution = cloth_size
     csf.params.rigidness       = 2      # 1=steep, 2=normal, 3=flat
     csf.params.time_step       = 0.65
     csf.params.class_threshold = CSF_CLASS_THRESH
@@ -151,7 +152,7 @@ def has_ground_truth_labels(city):
     labels   = np.array(las.classification, dtype=np.int32)
     frac     = (np.isin(labels, [2, 11])).sum() / len(labels)
     print(f"  Label check: {100*frac:.2f}% sidewalk/street labels", end="")
-    if frac > LABEL_THRESHOLD:
+    if city.lower() in LABELLED_CITIES and frac >= LABEL_THRESHOLD:
         print(f" -> Has ground truth labels")
         return True
     else:
@@ -436,14 +437,24 @@ if __name__ == "__main__":
         print(f"  Step 3: Connected component noise removal")
 
         # Load city ONCE — share same sampled data across all steps
-        from utils import load_city as _load_city, sample_and_filter as _saf
+        from utils import load_city as _load_city, sample_and_filter as _saf, N_NEIGHBORS
+        from utils import build_segments as _bs, add_context_features as _acf
         xyz_raw, labels_raw, features_raw, feat_names = _load_city(args.city)
         xyz_sampled, labels_sampled, features_sampled = _saf(
             xyz_raw, labels_raw, features_raw, feat_names, args.sample)
 
         # Step 1 — CSF on the already-sampled points
         print(f"\n── Step 1: CSF Geometry Filter ──")
-        csf_mask = csf_ground_filter(xyz_sampled)
+        for cloth_size in [0.5, 1.0, 2.0]:
+            csf_mask  = csf_ground_filter(xyz_sampled, cloth_size=cloth_size)
+            test_xyz  = xyz_sampled[csf_mask]
+            test_feats = features_sampled[csf_mask]
+            if test_feats.shape[1] > expected // 3:
+                test_feats = test_feats[:, :expected // 3]
+            _, test_segs, _, _, _ = _bs(test_xyz, labels_sampled[csf_mask], test_feats)
+            if len(test_segs) > N_NEIGHBORS:
+                break
+            print(f"  Too few segments with cloth_size={cloth_size}, retrying...")
 
         # Apply CSF mask to sampled data
         xyz_s      = xyz_sampled[csf_mask]
@@ -453,7 +464,6 @@ if __name__ == "__main__":
 
         # Step 2 — Build segments and run MLP + fine-tune on CSF-filtered points
         print(f"\n-- Step 2: MLP Classification + Fine-Tuning --")
-        from utils import build_segments as _bs, add_context_features as _acf
 
         # Align per-point features BEFORE segmentation
         n_point_feats = expected // 3
@@ -468,6 +478,16 @@ if __name__ == "__main__":
 
         seg_xyz, seg_feats, seg_labels, \
             unique_voxels, inverse_idx = _bs(xyz_s, labels_s, features_s)
+        if len(seg_xyz) <= N_NEIGHBORS:
+            print(f"  [WARNING] Too few segments ({len(seg_xyz)}) for context features — skipping CSF and retrying without geometry filter")
+            csf_mask   = np.ones(len(xyz_sampled), dtype=bool)
+            xyz_s      = xyz_sampled
+            labels_s   = labels_sampled
+            features_s = features_sampled
+            if features_s.shape[1] > n_point_feats:
+                features_s = features_s[:, :n_point_feats]
+            seg_xyz, seg_feats, seg_labels, \
+                unique_voxels, inverse_idx = _bs(xyz_s, labels_s, features_s)
         X_seg, _                       = _acf(seg_xyz, seg_feats)
 
         # Final check
