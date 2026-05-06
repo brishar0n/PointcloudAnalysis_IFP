@@ -84,11 +84,18 @@ if __name__ == "__main__":
             print("Skipping — test missing classes")
             continue
 
-        val_size = int(len(X_train) * 0.1)
+        # ── 60/20/20 split ────────────────────────────────────────────────
+        val_size = int(len(X_train) * 0.25)
         X_val    = X_train[:val_size]
         y_val    = y_train[:val_size]
         X_tr     = X_train[val_size:]
         y_tr     = y_train[val_size:]
+
+        total = len(X_train)
+        print(f"\n60/20/20 Split:")
+        print(f"  Train: {len(X_tr):,} ({100*len(X_tr)/total:.0f}%)"
+              f" | Val: {len(X_val):,} ({100*len(X_val)/total:.0f}%)"
+              f" | Test city: {test_city} ({len(X_test):,} segments)")
 
         start = time.time()
         model, scaler, device, _, _ = train_mlp(
@@ -96,39 +103,29 @@ if __name__ == "__main__":
         elapsed = time.time() - start
         print(f"Training done in {elapsed:.1f}s")
 
-        y_pred  = predict_mlp(model, scaler, X_test, device)
-        bal_acc = balanced_accuracy_score(y_test, y_pred)
-        sw_f1   = f1_score(y_test, y_pred, labels=[1],
-                           average=None, zero_division=0)[0]
-
-        print(f"\nResults for {test_city}:")
-        print(f"Balanced Accuracy: {bal_acc*100:.1f}%  |  Sidewalk F1: {sw_f1:.3f}")
-
-        from sklearn.metrics import classification_report
-        print(classification_report(y_test, y_pred, labels=[0,1,2],
-                                     target_names=["other","sidewalk","street"],
-                                     zero_division=0))
-
-        os.makedirs("results", exist_ok=True)
-        cm      = confusion_matrix(y_test, y_pred, labels=[0, 1, 2])
-        cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
-        plt.figure(figsize=(7, 5))
-        sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
-                    xticklabels=["other", "sidewalk", "street"],
-                    yticklabels=["other", "sidewalk", "street"])
-        plt.title(f"MLP LOCO — Hold out {test_city.upper()}")
-        plt.ylabel("True Label")
-        plt.xlabel("Predicted Label")
-        plt.tight_layout()
-        plt.savefig(f"results/mlp_loco_{test_city}_confusion.png", dpi=150)
-        plt.show()
+        # ── Full evaluation: train / val / test ───────────────────────────
+        from eval_utils import full_evaluation
+        metrics = full_evaluation(
+            model, scaler, device,
+            X_tr,    y_tr,
+            X_val,   y_val,
+            X_test,  y_test,
+            predict_fn  = predict_mlp,
+            prefix      = f"mlp_loco_{test_city}",
+            results_dir = "results"
+        )
 
         loco_results.append({
             "held_out_city" : test_city,
-            "n_train"       : len(X_train),
+            "n_train"       : len(X_tr),
+            "n_val"         : len(X_val),
             "n_test"        : len(X_test),
-            "bal_acc"       : round(bal_acc * 100, 1),
-            "sidewalk_f1"   : round(sw_f1, 3),
+            "train_acc"     : round(metrics["train_acc"] * 100, 1),
+            "val_acc"       : round(metrics["val_acc"]   * 100, 1),
+            "bal_acc"       : round(metrics["test_acc"]  * 100, 1),
+            "train_sw_f1"   : round(metrics["train_sw_f1"], 3),
+            "val_sw_f1"     : round(metrics["val_sw_f1"],   3),
+            "sidewalk_f1"   : round(metrics["test_sw_f1"],  3),
         })
 
     # ── Step 4: Summary ────────────────────────────────────────────────────
@@ -141,6 +138,6 @@ if __name__ == "__main__":
     print(f"Average sidewalk F1:       {results_df['sidewalk_f1'].mean():.3f}")
 
     results_df.to_csv("results/mlp_loco_results.csv", index=False)
-    print(f"\n✅ Results saved to results/mlp_loco_results.csv")
-    print(f"✅ Plots saved to results/")
+    print(f"\nResults saved to results/mlp_loco_results.csv")
+    print(f"Plots saved to results/")
     print(f"\nTo train final model run: python dl_train_final_model.py")

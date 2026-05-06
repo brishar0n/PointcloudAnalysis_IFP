@@ -65,23 +65,47 @@ if __name__ == "__main__":
     for cls, count in zip(unique, counts):
         print(f"  {cls} ({names[cls]}): {count:,} ({100*count/len(y_all):.1f}%)")
 
-    # ── Step 4: Train ─────────────────────────────────────────────────────
-    val_size = int(len(X_all) * 0.1)
+    # ── Step 4: 60/20/20 Split ────────────────────────────────────────────
+    # Note: Test set = LOCO evaluation (already done in dl_loco_evaluation.py)
+    # Here we split remaining data into 75% train / 25% val
+    # which gives approximately 60% train, 20% val of total data
+    val_size = int(len(X_all) * 0.25)
     X_val    = X_all[:val_size]
     y_val    = y_all[:val_size]
     X_tr     = X_all[val_size:]
     y_tr     = y_all[val_size:]
 
+    total = len(X_all)
+    print(f"\n60/20/20 Split (test = LOCO, evaluated separately):")
+    print(f"  Train: {len(X_tr):,} ({100*len(X_tr)/total:.0f}%)"
+          f" | Val: {len(X_val):,} ({100*len(X_val)/total:.0f}%)")
+
     print(f"\nTraining MLP on all cities...")
     model, scaler, device, _, _ = train_mlp(
         X_tr, y_tr, X_val, y_val, epochs=args.epochs)
 
-    # ── Step 5: Save ──────────────────────────────────────────────────────
+    # ── Step 5: Train + Val evaluation only ──────────────────────────────
+    from eval_utils import full_evaluation
+    from dl_classifier import predict_mlp
+    full_evaluation(
+        model, scaler, device,
+        X_tr,  y_tr,
+        X_val, y_val,
+        X_tr,  y_tr,
+        predict_fn  = predict_mlp,
+        prefix      = "final_mlp",
+        results_dir = "results",
+        show_test   = False
+    )
+
+    # ── Step 6: Save ──────────────────────────────────────────────────────
     os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(), "models/final_mlp_classifier.pt")
     joblib.dump(scaler, "models/final_mlp_scaler.joblib")
 
-    print("\n✅ Final MLP model saved!")
+    print("\nFinal MLP model saved!")
     print("   models/final_mlp_classifier.pt")
     print("   models/final_mlp_scaler.joblib")
-    print("\nNow run: python dl_apply_model.py --city utrecht")
+    print("\nNow apply model with:")
+    for city in LABELLED_CITIES + ["utrecht", "bologna"]:
+        print(f"   python dl_apply_model.py --city {city}")

@@ -14,10 +14,10 @@ Why MLP?
 
 Architecture:
     Input (123 features)
-    → Dense(256) + BatchNorm + ReLU + Dropout(0.3)
-    → Dense(128) + BatchNorm + ReLU + Dropout(0.3)
-    → Dense(64)  + BatchNorm + ReLU + Dropout(0.2)
-    → Dense(3)   + Softmax
+    -> Dense(256) + BatchNorm + ReLU + Dropout(0.3)
+    -> Dense(128) + BatchNorm + ReLU + Dropout(0.3)
+    -> Dense(64)  + BatchNorm + ReLU + Dropout(0.2)
+    -> Dense(3)   + Softmax
     Output (3 classes: other, sidewalk, street)
 
 Usage:
@@ -57,13 +57,6 @@ torch.manual_seed(SEED)
 class SidewalkMLP(nn.Module):
     """
     Multi-Layer Perceptron for sidewalk classification.
-
-    WHY THIS ARCHITECTURE?
-    - 3 hidden layers — deep enough to learn complex patterns
-    - BatchNorm — stabilizes training, faster convergence
-    - Dropout — prevents overfitting, better cross-city generalization
-    - ReLU — standard activation for classification tasks
-    - Softmax output — probability distribution over 3 classes
     """
 
     def __init__(self, input_dim, num_classes=3, dropout=0.3):
@@ -121,11 +114,19 @@ def train_mlp(X_train, y_train, X_val, y_val,
     X_val_sc   = scaler.transform(X_val).astype(np.float32)
 
     # Compute class weights for imbalance
+    # Always produce weights for all 3 classes even if some are missing
     classes, counts = np.unique(y_train, return_counts=True)
-    weights         = 1.0 / counts
-    weights         = weights / weights.sum() * len(classes)
-    class_weights   = torch.FloatTensor(weights).to(device)
-    print(f"  Class weights: {dict(zip(classes, weights.round(3)))}")
+    if len(classes) < 3:
+        print(f"  [WARNING] Only {len(classes)} class(es) in training data: {list(classes)}")
+        print(f"  Results may be unreliable — this city may not have enough labels.")
+    weight_vec = np.ones(3, dtype=np.float32)
+    raw_w      = 1.0 / counts
+    raw_w      = raw_w / raw_w.sum() * len(classes)
+    for c, w in zip(classes, raw_w):
+        weight_vec[c] = w
+    class_weights   = torch.FloatTensor(weight_vec).to(device)
+    weights_display = {i: round(float(weight_vec[i]), 3) for i in range(3)}
+    print(f"  Class weights: {weights_display}")
 
     # Convert to tensors
     X_tr = torch.FloatTensor(X_train_sc).to(device)
@@ -255,37 +256,43 @@ if __name__ == "__main__":
                 test_tile = t
                 break
 
-    train_mask = tile_id != test_tile
     test_mask  = tile_id == test_tile
+    remain_mask = tile_id != test_tile
 
-    X_train, y_train = X_seg[train_mask], seg_labels[train_mask]
-    X_test,  y_test  = X_seg[test_mask],  seg_labels[test_mask]
+    X_remain, y_remain = X_seg[remain_mask], seg_labels[remain_mask]
+    X_test,   y_test   = X_seg[test_mask],   seg_labels[test_mask]
 
-    # Use 10% of training as validation
-    val_size  = int(len(X_train) * 0.1)
-    X_val     = X_train[:val_size]
-    y_val     = y_train[:val_size]
-    X_train   = X_train[val_size:]
-    y_train   = y_train[val_size:]
+    # ── 60/20/20 split ────────────────────────────────────────────────────
+    # Test  = held-out spatial tile (~20% of data)
+    # Val   = 25% of remaining data -> gives ~20% of total
+    # Train = 75% of remaining data -> gives ~60% of total
+    val_size = int(len(X_remain) * 0.25)
+    X_val    = X_remain[:val_size]
+    y_val    = y_remain[:val_size]
+    X_train  = X_remain[val_size:]
+    y_train  = y_remain[val_size:]
 
-    print(f"\nTile split — test tile: {test_tile}")
-    print(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
+    total = len(X_seg)
+    print(f"\n60/20/20 Spatial Split — test tile: {test_tile}")
+    print(f"  Train: {len(X_train):,} ({100*len(X_train)/total:.0f}%)"
+          f" | Val: {len(X_val):,} ({100*len(X_val)/total:.0f}%)"
+          f" | Test: {len(X_test):,} ({100*len(X_test)/total:.0f}%)")
 
     # ── Step 3: Train MLP ─────────────────────────────────────────────────
     model, scaler, device, train_losses, val_accs = train_mlp(
         X_train, y_train, X_val, y_val, epochs=args.epochs)
 
-    # ── Step 4: Evaluate ──────────────────────────────────────────────────
-    y_pred         = predict_mlp(model, scaler, X_test, device)
-    bal_acc        = balanced_accuracy_score(y_test, y_pred)
-    sw_f1          = f1_score(y_test, y_pred, labels=[1],
-                               average=None, zero_division=0)[0]
-
-    print(f"\nTest Results:")
-    print(f"Balanced Accuracy: {bal_acc*100:.1f}%  |  Sidewalk F1: {sw_f1:.3f}")
-    print(classification_report(y_test, y_pred, labels=[0, 1, 2],
-                                 target_names=["other", "sidewalk", "street"],
-                                 zero_division=0))
+    # ── Step 4: Full evaluation — train / val / test ───────────────────────
+    from eval_utils import full_evaluation
+    full_evaluation(
+        model, scaler, device,
+        X_train, y_train,
+        X_val,   y_val,
+        X_test,  y_test,
+        predict_fn  = predict_mlp,
+        prefix      = f"{args.city}_mlp",
+        results_dir = "results"
+    )
 
     # ── Step 5: Training curves ───────────────────────────────────────────
     os.makedirs("results", exist_ok=True)
@@ -303,27 +310,12 @@ if __name__ == "__main__":
     plt.suptitle(f"MLP Training — {args.city.upper()}", fontsize=13)
     plt.tight_layout()
     plt.savefig(f"results/{args.city}_mlp_training.png", dpi=150)
-    plt.show()
+    plt.close()
 
-    # ── Step 6: Confusion matrix ──────────────────────────────────────────
-    cm      = confusion_matrix(y_test, y_pred, labels=[0, 1, 2])
-    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
-
-    plt.figure(figsize=(7, 5))
-    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
-                xticklabels=["other", "sidewalk", "street"],
-                yticklabels=["other", "sidewalk", "street"])
-    plt.title(f"Confusion Matrix — MLP — {args.city.upper()}")
-    plt.ylabel("True Label")
-    plt.xlabel("Predicted Label")
-    plt.tight_layout()
-    plt.savefig(f"results/{args.city}_mlp_confusion.png", dpi=150)
-    plt.show()
-
-    # ── Step 7: Save model ────────────────────────────────────────────────
+    # ── Step 6: Save model ────────────────────────────────────────────────
     os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(),
                f"models/{args.city}_mlp_classifier.pt")
     import joblib
     joblib.dump(scaler, f"models/{args.city}_mlp_scaler.joblib")
-    print(f"\n✅ MLP model saved → models/{args.city}_mlp_classifier.pt")
+    print(f"\nMLP model saved -> models/{args.city}_mlp_classifier.pt")
