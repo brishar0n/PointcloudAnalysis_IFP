@@ -4,7 +4,7 @@ PIC: Brigitte
 
 Loads LiDAR point cloud data (.LAZ/.LAS), computes geometric features, and prepares training datasets for the sidewalk classifier.
 
-This is the first stage of the Sidewalk Scanner pipeline — everything downstream (classification, boundary extraction, width metrics, visualisation) depends on the outputs from this module.
+This is the first stage of the Sidewalk Scanner pipeline. Everything downstream (classification, boundary extraction, width metrics, visualisation) depends on the outputs from this module.
 
 ## Setup
 
@@ -137,6 +137,6 @@ X_train, X_test, y_train, y_test, feature_names = prepare_training_data(low)
 ## Notes for team
 
 - **Classification (Person 2):** Your inputs are `train_data_flat.npz` and `train_data_blocks.npz`. The flat format works for `testing/` branches (sklearn models). The block format works for `feature/sidewalk-classifier` (PointNet/RandLA-Net). Feature names are included in both files.
-- **Boundary extraction (Person 3):** Use `low_featured.laz` as your starting point — it contains only street-level points with all features attached.
-- **Width metrics (Person 4):** Same — work from `low_featured.laz` or the classified output from Person 2.
+- **Boundary extraction (Person 3):** Use `low_featured.laz` as your starting point, it contains only street-level points with all features attached.
+- **Width metrics (Person 4):** Same, work from `low_featured.laz` or the classified output from Person 2.
 - **Visualisation (Person 5):** All `.laz` outputs open directly in CloudCompare with features as scalar fields.
