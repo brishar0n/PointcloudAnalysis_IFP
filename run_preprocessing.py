@@ -22,7 +22,7 @@ from preprocessing.splitter import (
 )
 
 
-def main():
+def main(args_list=None):
     parser = argparse.ArgumentParser(
         description="Preprocess a LiDAR point cloud for sidewalk analysis"
     )
@@ -40,7 +40,7 @@ def main():
                         help="Block size for DL training data")
     parser.add_argument("--skip-blocks", action="store_true",
                         help="Skip DL block preparation")
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
