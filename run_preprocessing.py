@@ -44,7 +44,6 @@ def main(args_list=None):
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     t0 = time.time()
 
     # ── Step 1: Load ──────────────────────────────────────────────
@@ -114,6 +113,8 @@ def main(args_list=None):
     print(f"Preprocessing complete in {elapsed/60:.1f} minutes")
     print(f"Outputs in: {out_dir.resolve()}")
     print(f"{'='*60}")
+    
+    return out_dir
 
 
 if __name__ == "__main__":
