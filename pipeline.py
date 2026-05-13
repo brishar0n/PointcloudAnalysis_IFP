@@ -20,18 +20,20 @@ def main():
                         help="Block size for DL training data")
     parser.add_argument("--skip-blocks", action="store_true",
                         help="Skip DL block preparation")
+    parser.add_argument("--city", required=True, help="City name (e.g., bologna)")
     
     args = parser.parse_args()
-
-    print("STARTING PIPELINE")
+    target_output = f"classification/preprocessed/{args.city}"
+    
+    print(f"STARTING PIPELINE for {args.city}")
     
     # ── Step 1: Preprocessing ──────────────────────────────────────────────
     print("\n--- STEP 1: Preprocessing ---")
     
     # Build the argument list dynamically
     args_list = [
-        args.input,
-        "--output", args.output,
+        args.input, 
+        "--output", target_output,
         "--height-split", str(args.height_split),
         "--block-size", str(args.block_size)
         ]
@@ -42,7 +44,7 @@ def main():
         args_list.append("--skip-blocks")
         
     # Call the main function directly, passing the arguments as a list
-    run_preprocessing.main(args_list)
+    outdir=run_preprocessing.main(args_list)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
