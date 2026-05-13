@@ -3,24 +3,28 @@ from __future__ import annotations
 """
 width_metrics.py
 
-Sujeeth Gunasekaran - Metrics & Analysis
+Sujeeth Gunasekaran - Width Metrics / Analysis
 
-This module calculates sidewalk accessibility metrics from the team pipeline.
+This file calculates practical sidewalk access measurements from the point cloud
+pipeline used in the IFP pedestrian access project.
 
-It supports two modes:
+The goal is to produce useful sidewalk metrics for pedestrian access analysis,
+while avoiding unrealistic results caused by noisy classification or large open
+areas being labelled as sidewalk.
 
-1. Point-based metrics
-   - Input: classified .laz/.las file
-   - Uses class labels:
-        2  = sidewalk
-        11 = street
-        0, 5, 8, 13, 15 = obstacles / other objects
-   - Outputs segment-level width, usable width, obstacle count and slope.
+Supported analysis modes:
 
-2. Boundary-based metrics
-   - Input: kerb .obj and HFE .obj files from Ahmed's boundary extraction module
-   - Calculates the distance between kerb and HFE boundary points.
-   - This is the more realistic sidewalk width method once boundary extraction is ready.
+1. Point-based analysis
+   - Uses classified .laz/.las files.
+   - Uses sidewalk-labelled points to estimate walking direction.
+   - Measures width across the sidewalk using PCA projection.
+   - Uses percentile ranges to reduce the impact of outliers.
+   - Filters out unrealistic width segments above a safe threshold.
+   - Estimates usable width after accounting for obstacle points.
+
+2. Boundary-based analysis
+   - Uses KERB and HFE .obj boundary files.
+   - Measures distances between boundary points.
 """
 
 import argparse
@@ -33,22 +37,16 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 
-# Team label format
 SIDEWALK_LABEL = 2
 STREET_LABEL = 11
-
-# Extra labels seen in the team visualisation notebook.
-# These are treated as possible obstacles when they appear inside a sidewalk segment.
 OBSTACLE_LABELS = {0, 5, 8, 13, 15}
+
+# Any segment wider than this is treated as likely classifier spillover.
+# Real sidewalks may vary, but 15m is a safer upper bound for this stage.
+MAX_REASONABLE_WIDTH_M = 15.0
 
 
 def load_laz_points(file_path: Path) -> pd.DataFrame:
-    """
-    Load a classified LAS/LAZ point cloud into a DataFrame.
-
-    This keeps only the columns needed for metrics:
-    x, y, z and classification.
-    """
     las = laspy.read(file_path)
 
     return pd.DataFrame({
@@ -60,11 +58,6 @@ def load_laz_points(file_path: Path) -> pd.DataFrame:
 
 
 def get_sidewalk_points(points: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return only sidewalk points.
-
-    In the team pipeline, label 2 represents sidewalk/pedestrian surface.
-    """
     sidewalk = points[points["classification"] == SIDEWALK_LABEL].copy()
 
     if sidewalk.empty:
@@ -74,108 +67,160 @@ def get_sidewalk_points(points: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_obstacle_points(points: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return points that may block pedestrian movement.
-
-    This includes vegetation, furniture, vehicles and unclassified objects.
-    """
     return points[points["classification"].isin(OBSTACLE_LABELS)].copy()
+
+
+def estimate_sidewalk_axes(sidewalk_points: pd.DataFrame):
+    """
+    Estimate the main walking direction of the sidewalk.
+
+    This avoids measuring width using raw x/y ranges, which can give unrealistic
+    values when the street is diagonal or curved in the scan.
+    """
+    xy = sidewalk_points[["x", "y"]].to_numpy()
+
+    origin = xy.mean(axis=0)
+    centred = xy - origin
+
+    _, _, vh = np.linalg.svd(centred, full_matrices=False)
+
+    along_axis = vh[0]
+    across_axis = np.array([-along_axis[1], along_axis[0]])
+
+    return origin, along_axis, across_axis
+
+
+def add_projection_columns(
+    points: pd.DataFrame,
+    origin: np.ndarray,
+    along_axis: np.ndarray,
+    across_axis: np.ndarray,
+) -> pd.DataFrame:
+    points = points.copy()
+
+    xy = points[["x", "y"]].to_numpy()
+    centred = xy - origin
+
+    points["along_m"] = centred @ along_axis
+    points["across_m"] = centred @ across_axis
+
+    return points
+
+
+def robust_range(values: pd.Series, lower: float = 5, upper: float = 95) -> float:
+    """
+    Calculate a percentile range instead of max-min.
+
+    This reduces the effect of outlier points.
+    """
+    if values.empty:
+        return 0.0
+
+    return float(np.percentile(values, upper) - np.percentile(values, lower))
 
 
 def segment_sidewalk(points: pd.DataFrame, segment_size: float = 1.0) -> pd.DataFrame:
     """
-    Split sidewalk points into small segments along the x-axis.
-
-    This is a baseline segmentation method. It gives us local measurements instead
-    of only one global width value for the entire sidewalk.
+    Split sidewalk points into small sections along the walking direction.
     """
     points = points.copy()
-    x_min = points["x"].min()
-    points["segment_id"] = ((points["x"] - x_min) / segment_size).astype(int)
+    start = points["along_m"].min()
+
+    points["segment_id"] = ((points["along_m"] - start) / segment_size).astype(int)
+
     return points
 
 
 def compute_width(segment: pd.DataFrame) -> float:
     """
-    Estimate segment width using the y-axis range.
-
-    This is the fallback point-cloud method. The stronger method is the boundary
-    method further below, which uses kerb and HFE polylines.
+    Measure sidewalk width across the walking direction.
     """
-    return float(segment["y"].max() - segment["y"].min())
+    return robust_range(segment["across_m"], lower=5, upper=95)
 
 
 def compute_slope(segment: pd.DataFrame) -> float:
     """
-    Estimate slope percentage from z-change over x-distance.
-
-    This is a simple local slope estimate for each segment.
+    Estimate slope percentage for one sidewalk segment.
     """
-    x_range = segment["x"].max() - segment["x"].min()
+    along_range = robust_range(segment["along_m"], lower=5, upper=95)
 
-    if x_range == 0:
+    if along_range == 0:
         return 0.0
 
-    z_range = segment["z"].max() - segment["z"].min()
-    return float((z_range / x_range) * 100)
+    z_range = robust_range(segment["z"], lower=5, upper=95)
+
+    return float((z_range / along_range) * 100)
 
 
-def compute_usable_width(segment: pd.DataFrame, all_points: pd.DataFrame) -> tuple[float, int]:
+def compute_usable_width(
+    segment: pd.DataFrame,
+    projected_obstacles: pd.DataFrame,
+) -> tuple[float, int]:
     """
-    Estimate usable width after accounting for obstacles.
-
-    Logic:
-    - Start with the total sidewalk width.
-    - Find obstacle points inside the same x/y corridor as the segment.
-    - Subtract the obstacle span from the total width.
-    - Never return a negative width.
+    Estimate remaining usable width after obstacle points are considered.
     """
     total_width = compute_width(segment)
-    obstacles = get_obstacle_points(all_points)
 
-    if obstacles.empty:
+    if projected_obstacles.empty:
         return total_width, 0
 
-    x_min = segment["x"].min()
-    x_max = segment["x"].max()
-    y_min = segment["y"].min()
-    y_max = segment["y"].max()
+    along_min = segment["along_m"].min()
+    along_max = segment["along_m"].max()
 
-    segment_obstacles = obstacles[
-        (obstacles["x"] >= x_min) &
-        (obstacles["x"] <= x_max) &
-        (obstacles["y"] >= y_min) &
-        (obstacles["y"] <= y_max)
+    across_min = np.percentile(segment["across_m"], 5)
+    across_max = np.percentile(segment["across_m"], 95)
+
+    segment_obstacles = projected_obstacles[
+        (projected_obstacles["along_m"] >= along_min)
+        & (projected_obstacles["along_m"] <= along_max)
+        & (projected_obstacles["across_m"] >= across_min)
+        & (projected_obstacles["across_m"] <= across_max)
     ]
 
     if segment_obstacles.empty:
         return total_width, 0
 
-    obstacle_span = segment_obstacles["y"].max() - segment_obstacles["y"].min()
+    obstacle_span = robust_range(segment_obstacles["across_m"], lower=5, upper=95)
     usable_width = max(total_width - obstacle_span, 0.0)
 
     return float(usable_width), int(len(segment_obstacles))
 
 
-def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> pd.DataFrame:
-    """
-    Generate all point-based metrics for each sidewalk segment.
-
-    Output per segment:
-    - overall width
-    - usable width
-    - obstacle count
-    - slope percentage
-    """
+def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> tuple[pd.DataFrame, int]:
     sidewalk = get_sidewalk_points(points)
+
+    origin, along_axis, across_axis = estimate_sidewalk_axes(sidewalk)
+
+    projected_points = add_projection_columns(
+        points,
+        origin,
+        along_axis,
+        across_axis,
+    )
+
+    sidewalk = get_sidewalk_points(projected_points)
+    obstacles = get_obstacle_points(projected_points)
+
     sidewalk = segment_sidewalk(sidewalk, segment_size)
 
     rows = []
+    skipped_unrealistic_segments = 0
 
     for segment_id, group in sidewalk.groupby("segment_id"):
+        if len(group) < 20:
+            continue
+
         overall_width = compute_width(group)
+
+        # Client-safe filter:
+        # very large "sidewalk" widths are usually caused by classifier spillover,
+        # plazas, open areas, or disconnected surfaces being grouped together.
+        if overall_width > MAX_REASONABLE_WIDTH_M:
+            skipped_unrealistic_segments += 1
+            continue
+
         slope_percent = compute_slope(group)
-        usable_width, obstacle_count = compute_usable_width(group, points)
+        usable_width, obstacle_count = compute_usable_width(group, obstacles)
 
         rows.append({
             "segment_id": int(segment_id),
@@ -186,15 +231,17 @@ def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> 
             "slope_percent": slope_percent,
         })
 
-    return pd.DataFrame(rows)
+    if not rows:
+        raise ValueError("No valid sidewalk segments found after filtering.")
+
+    return pd.DataFrame(rows), skipped_unrealistic_segments
 
 
-def summarise_segment_metrics(metrics: pd.DataFrame) -> dict:
-    """
-    Create a summary dictionary from the segment-level metrics table.
-    """
+def summarise_segment_metrics(metrics: pd.DataFrame, skipped_unrealistic_segments: int) -> dict:
     return {
         "segment_count": int(len(metrics)),
+        "skipped_unrealistic_segments": int(skipped_unrealistic_segments),
+        "max_reasonable_width_m": float(MAX_REASONABLE_WIDTH_M),
         "average_overall_width_m": float(metrics["overall_width_m"].mean()),
         "minimum_overall_width_m": float(metrics["overall_width_m"].min()),
         "maximum_overall_width_m": float(metrics["overall_width_m"].max()),
@@ -204,17 +251,14 @@ def summarise_segment_metrics(metrics: pd.DataFrame) -> dict:
         "average_slope_percent": float(metrics["slope_percent"].mean()),
         "maximum_slope_percent": float(metrics["slope_percent"].max()),
         "total_obstacle_points": int(metrics["obstacle_count"].sum()),
+        "quality_note": (
+            "Segments above the reasonable width threshold were excluded because "
+            "they are likely caused by classifier spillover or large open areas."
+        ),
     }
 
 
 def load_obj_vertices(obj_path: Path) -> np.ndarray:
-    """
-    Read vertex points from an OBJ file.
-
-    Ahmed's boundary extraction saves kerb and HFE boundaries as OBJ files.
-    OBJ vertex lines look like:
-        v x y z
-    """
     vertices = []
 
     with open(obj_path, "r", encoding="utf-8") as file:
@@ -230,16 +274,6 @@ def load_obj_vertices(obj_path: Path) -> np.ndarray:
 
 
 def compute_boundary_widths(kerb_points: np.ndarray, hfe_points: np.ndarray) -> dict:
-    """
-    Compute sidewalk width using kerb and HFE boundary points.
-
-    This is the more realistic width method:
-    - Kerb = road-side boundary
-    - HFE = building/frontage-side boundary
-
-    For each kerb point, the nearest HFE point is found.
-    Those distances are then summarised.
-    """
     tree = cKDTree(hfe_points[:, :2])
     distances, _ = tree.query(kerb_points[:, :2], k=1)
 
@@ -257,9 +291,6 @@ def save_point_metric_outputs(
     summary: dict,
     output_dir: Path,
 ) -> None:
-    """
-    Save point-based segment metrics to CSV and summary metrics to JSON.
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_path = output_dir / "sidewalk_segment_metrics.csv"
@@ -275,9 +306,6 @@ def save_point_metric_outputs(
 
 
 def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
-    """
-    Save boundary-based width summary to JSON.
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary_path = output_dir / "boundary_width_summary.json"
@@ -289,23 +317,20 @@ def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
 
 
 def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -> None:
-    """
-    Run the point-based metric workflow.
-    """
     points = load_laz_points(input_path)
-    metrics = compute_segment_metrics(points, segment_size)
-    summary = summarise_segment_metrics(metrics)
+    metrics, skipped_unrealistic_segments = compute_segment_metrics(points, segment_size)
 
+    summary = summarise_segment_metrics(metrics, skipped_unrealistic_segments)
     summary["input_file"] = str(input_path)
-    summary["method"] = "Point-based segmented width, usable width, obstacle count and slope"
+    summary["method"] = (
+        "PCA-projected point-based width metrics using robust percentiles "
+        "with filtering for unrealistic sidewalk widths"
+    )
 
     save_point_metric_outputs(metrics, summary, output_dir)
 
 
 def run_boundary_metrics(kerb_obj: Path, hfe_obj: Path, output_dir: Path) -> None:
-    """
-    Run the boundary-based metric workflow using Ahmed's kerb/HFE outputs.
-    """
     kerb_points = load_obj_vertices(kerb_obj)
     hfe_points = load_obj_vertices(hfe_obj)
 
@@ -313,7 +338,7 @@ def run_boundary_metrics(kerb_obj: Path, hfe_obj: Path, output_dir: Path) -> Non
 
     summary["kerb_obj"] = str(kerb_obj)
     summary["hfe_obj"] = str(hfe_obj)
-    summary["method"] = "Boundary-based width between kerb and HFE polylines"
+    summary["method"] = "Boundary-based width between kerb and HFE points"
 
     save_boundary_metric_outputs(summary, output_dir)
 
