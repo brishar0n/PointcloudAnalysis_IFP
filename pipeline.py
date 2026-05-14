@@ -34,7 +34,7 @@ def main():
     args_list = [
         args.input, 
         "--output", target_output,
-        "--height-split", str(args.height_split),
+        "--height-split", str(args.height_split),   
         "--block-size", str(args.block_size)
         ]
     
