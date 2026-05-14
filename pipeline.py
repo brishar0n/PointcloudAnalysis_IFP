@@ -1,5 +1,7 @@
 import argparse
 import run_preprocessing
+import subprocess
+import sys
 
 def main():
     parser = argparse.ArgumentParser(description="Main Pipeline")
@@ -34,7 +36,7 @@ def main():
     args_list = [
         args.input, 
         "--output", target_output,
-        "--height-split", str(args.height_split),   
+        "--height-split", str(args.height_split),
         "--block-size", str(args.block_size)
         ]
     
@@ -45,6 +47,23 @@ def main():
         
     # Call the main function directly, passing the arguments as a list
     outdir=run_preprocessing.main(args_list)
+    
+    print("\n--- CONFIGURING CLASSIFICATION ---")
+    
+    user_epochs = input("Enter number of epochs (default 50): ").strip() or "50"
+    do_loco = input("Run LOCO evaluation? (y/n): ").strip().lower() == 'y'
+    do_train = input("Train final model? (y/n): ").strip().lower() == 'y'
+    
+    class_cmd = [sys.executable, "run_pipeline.py", "--apply", "--cities", args.city]
+    
+    if do_loco:
+        class_cmd.append("--loco")
+    if do_train:
+        class_cmd.append("--train")
+        
+    class_cmd.extend(["--epochs", user_epochs])
+    
+    subprocess.run(class_cmd, cwd="classification", check=True)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
