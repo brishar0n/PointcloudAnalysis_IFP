@@ -2,29 +2,7 @@ import argparse
 import run_preprocessing
 import subprocess
 import sys
-
-def main():
-    parser = argparse.ArgumentParser(description="Main Pipeline")
-    parser.add_argument("input", 
-                        help="Path to input .LAZ or .LAS file")
-    parser.add_argument("--output", "-o", 
-                        default="preprocessed/", 
-                        help="Output directory")
-    parser.add_argument("--subsample", 
-                        type=float, 
-                        default=None, 
-                        help="Voxel size for subsampling (e.g. 0.05)")
-    parser.add_argument("--height-split", 
-                        type=float, 
-                        default=2.0, 
-                        help="Height threshold for high/low split")
-    parser.add_argument("--block-size", type=float, default=5.0,
-                        help="Block size for DL training data")
-    parser.add_argument("--skip-blocks", action="store_true",
-                        help="Skip DL block preparation")
-    parser.add_argument("--city", required=True, help="City name (e.g., bologna)")
-    
-    args = parser.parse_args()
+def preprocessing(args):
     target_output = f"classification/preprocessed/{args.city}"
     
     print(f"STARTING PIPELINE for {args.city}")
@@ -48,22 +26,84 @@ def main():
     # Call the main function directly, passing the arguments as a list
     outdir=run_preprocessing.main(args_list)
     
-    print("\n--- CONFIGURING CLASSIFICATION ---")
+def classification(args):
     
-    user_epochs = input("Enter number of epochs (default 50): ").strip() or "50"
-    do_loco = input("Run LOCO evaluation? (y/n): ").strip().lower() == 'y'
-    do_train = input("Train final model? (y/n): ").strip().lower() == 'y'
+    print("\n--- STEP 2: Classification ---")
     
-    class_cmd = [sys.executable, "run_pipeline.py", "--apply", "--cities", args.city]
-    
-    if do_loco:
+    class_cmd = [sys.executable, "run_pipeline.py"]
+    if args.all: 
+        class_cmd.append("--all")
+    if args.loco:
         class_cmd.append("--loco")
-    if do_train:
+    if args.train:
         class_cmd.append("--train")
-        
-    class_cmd.extend(["--epochs", user_epochs])
+    if args.apply:
+        class_cmd.append("--apply")
+        if args.cities is not None:
+            class_cmd.append("--cities")
+            class_cmd.extend(args.cities)
+    if args.epochs:
+        class_cmd.extend(["--epochs",str(args.epochs)])
     
     subprocess.run(class_cmd, cwd="classification", check=True)
+    
+def main():
+    parser = argparse.ArgumentParser(description="Main Pipeline")
+    parser.add_argument("input", 
+                        help="Path to input .LAZ or .LAS file")
+    # parser.add_argument("--output", "-o", 
+    #                     default="preprocessed/", 
+    #                     help="Output directory")
+    parser.add_argument("--subsample", 
+                        type=float, 
+                        default=None, 
+                        help="Voxel size for subsampling (e.g. 0.05)")
+    parser.add_argument("--height-split", 
+                        type=float, 
+                        default=2.0, 
+                        help="Height threshold for high/low split")
+    parser.add_argument("--block-size", type=float, default=5.0,
+                        help="Block size for DL training data")
+    parser.add_argument("--skip-blocks", action="store_true",
+                        help="Skip DL block preparation")
+    parser.add_argument("--city", required=True, help="City name (e.g., bologna)")
+    
+    # Tags required for classification
+    parser.add_argument("--all", action="store_true",
+                        help="Run everything: LOCO -> train final model -> apply to cities")
+    parser.add_argument(
+        "--loco",
+        action="store_true",
+        help="Run LOCO cross-city evaluation"
+    )
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Train the final model on all labelled cities"
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply final model to unlabelled cities (use with --cities)"
+    )
+    parser.add_argument(
+        "--cities",
+        nargs="+",
+        default=["utrecht", "bologna"],
+        metavar="CITY",
+        help="Cities to apply the model to (default: utrecht bologna)"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=50,
+        help="Training epochs for LOCO and final model (default: 50)"
+    )
+    
+    args = parser.parse_args()
+    
+    preprocessing(args)
+    classification(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
