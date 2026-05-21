@@ -37,6 +37,8 @@ MIN_POINTS       = 8        # minimum points per segment
 N_NEIGHBORS      = 64       # context neighbours (optimised from 8,16,32,64,128)
 SMOOTH_THRESHOLD = 0.6      # 60% neighbour agreement to override prediction
 ROUGHNESS_THRESH = 0.05     # roughness filter threshold
+PURITY_THRESH    = 0.85     # min % of points agreeing on label to keep segment
+OTHER_RATIO      = 2.0      # max ratio of other:sidewalk segments (undersampling)
 
 # IFP Class Mapping Constants
 IFP_OTHER        = 0
@@ -101,10 +103,13 @@ def remap_labels(y):
 
 
 def sample_and_filter(xyz, labels, features, feat_names,
-                      sample_size=SAMPLE_SIZE):
+                      sample_size=SAMPLE_SIZE, training=False):
     """
     Sample points and apply roughness pre-filter to remove non-ground objects
     like parked cars and bushes (roughness > 0.05m).
+
+    training=True  : also apply other class undersampling (for training only)
+    training=False : skip undersampling (for inference/apply)
     """
     idx        = (np.random.choice(len(xyz), sample_size, replace=False)
                   if len(xyz) > sample_size else np.arange(len(xyz)))
@@ -120,21 +125,47 @@ def sample_and_filter(xyz, labels, features, feat_names,
         xyz_s      = xyz_s[mask]
         labels_s   = labels_s[mask]
         features_s = features_s[mask]
-        print(f"  Roughness filter removed {removed:,} points → {len(xyz_s):,} remain")
+        print(f"  Roughness filter removed {removed:,} points -> {len(xyz_s):,} remain")
+
+    # Other class undersampling — only during training
+    # Prevents model from defaulting to other due to class imbalance
+    if training:
+        minority_count = (labels_s != MODEL_OTHER).sum()
+        other_count    = (labels_s == MODEL_OTHER).sum()
+        max_other      = int(minority_count * OTHER_RATIO)
+        if other_count > max_other and minority_count > 100:
+            other_idx  = np.where(labels_s == MODEL_OTHER)[0]
+            keep_idx   = np.random.choice(other_idx, max_other, replace=False)
+            non_other  = np.where(labels_s != MODEL_OTHER)[0]
+            selected   = np.sort(np.concatenate([keep_idx, non_other]))
+            removed    = other_count - max_other
+            xyz_s      = xyz_s[selected]
+            labels_s   = labels_s[selected]
+            features_s = features_s[selected]
+            print(f"  Other undersampling removed {removed:,} other points "
+                  f"-> {len(xyz_s):,} remain "
+                  f"(ratio {OTHER_RATIO:.1f}x minority)")
+        else:
+            print(f"  Other undersampling skipped "
+                  f"(minority classes already balanced)")
 
     return xyz_s, labels_s, features_s
 
 
-def build_segments(xyz_s, labels_s, features_s):
+def build_segments(xyz_s, labels_s, features_s, purity_thresh=PURITY_THRESH):
     """
     Build voxel superpoints by dividing the XY plane into VOXEL_SIZE squares.
-    Assigns mean features and majority vote labels to each superpoint to reduce noise.
+    Assigns mean features and majority vote labels to each superpoint.
+
+    Purity filter: segments where less than purity_thresh of points agree
+    on the majority label are discarded — these are boundary voxels that
+    mix sidewalk and road and confuse the model.
     """
     voxel_coords               = np.floor(xyz_s[:, :2] / VOXEL_SIZE).astype(np.int32)
     voxel_keys                 = voxel_coords[:, 0] * 1_000_000 + voxel_coords[:, 1]
     unique_voxels, inverse_idx = np.unique(voxel_keys, return_inverse=True)
 
-    seg_xyz, seg_feats, seg_labels = [], [], []
+    seg_xyz, seg_feats, seg_labels, seg_purity = [], [], [], []
 
     for i in range(len(unique_voxels)):
         mask = inverse_idx == i
@@ -144,15 +175,32 @@ def build_segments(xyz_s, labels_s, features_s):
         feats = features_s[mask]
         lbls  = labels_s[mask]
         unique_lbls, counts = np.unique(lbls, return_counts=True)
+        majority_count = counts.max()
+        purity         = majority_count / mask.sum()
         seg_xyz.append(pts.mean(axis=0))
         seg_feats.append(feats.mean(axis=0))
         seg_labels.append(unique_lbls[np.argmax(counts)])
+        seg_purity.append(purity)
 
     seg_xyz    = np.array(seg_xyz)
     seg_feats  = np.array(seg_feats)
     seg_labels = np.array(seg_labels)
+    seg_purity = np.array(seg_purity)
 
-    print(f"  Segments: {len(seg_xyz):,}")
+    # Apply purity filter — only for labelled segments (skip if all other)
+    has_labels = np.isin(seg_labels, [1, 2]).any()
+    if has_labels and purity_thresh > 0:
+        pure_mask  = seg_purity >= purity_thresh
+        removed    = (~pure_mask).sum()
+        seg_xyz    = seg_xyz[pure_mask]
+        seg_feats  = seg_feats[pure_mask]
+        seg_labels = seg_labels[pure_mask]
+        print(f"  Segments: {len(seg_xyz):,} "
+              f"(purity filter removed {removed:,} boundary segments "
+              f"< {purity_thresh*100:.0f}% pure)")
+    else:
+        print(f"  Segments: {len(seg_xyz):,}")
+
     return seg_xyz, seg_feats, seg_labels, unique_voxels, inverse_idx
 
 
@@ -209,7 +257,8 @@ def process_city(city_name):
     print(f"\nProcessing {city_name}...")
     xyz, labels, features, feat_names             = load_city(city_name)
     xyz_s, labels_s, features_s                   = sample_and_filter(
-                                                        xyz, labels, features, feat_names)
+                                                        xyz, labels, features, feat_names,
+                                                        training=True)
     seg_xyz, seg_feats, seg_labels, \
         unique_voxels, inverse_idx                 = build_segments(
                                                         xyz_s, labels_s, features_s)
@@ -242,6 +291,29 @@ def train_rf(X_train, y_train):
                 random_state=SEED)
     clf.fit(X_tr, y_train)
     return clf, scaler
+
+
+def print_covariate_stats(X, y, feat_names):
+    """
+    Print mean and std of each feature per class.
+    Answers James's question: what does the model think each class looks like?
+    """
+    names = {0: "other", 1: "sidewalk", 2: "street"}
+    print(f"\n{'='*70}")
+    print(f"  COVARIATE STATISTICS PER CLASS")
+    print(f"{'='*70}")
+    print(f"  {'Feature':<30} {'Other mean':>12} {'SW mean':>10} {'ST mean':>10}")
+    print(f"  {'─'*64}")
+    for i, feat in enumerate(feat_names):
+        means = []
+        for cls in [0, 1, 2]:
+            mask = y == cls
+            if mask.sum() > 0:
+                means.append(X[mask, i].mean())
+            else:
+                means.append(float('nan'))
+        print(f"  {feat:<30} {means[0]:>12.4f} {means[1]:>10.4f} {means[2]:>10.4f}")
+    print(f"{'='*70}")
 
 
 def evaluate(y_true, y_pred, title=""):

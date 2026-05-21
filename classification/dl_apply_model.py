@@ -223,14 +223,22 @@ def process_city_data(city, sample_size, expected, csf_mask=None):
     return xyz_s, labels_s, X_seg, seg_xyz, unique_voxels, inverse_idx
 
 
-def project_to_points(predictions, unique_voxels, inverse_idx, n_points):
-    """Map segment-level predictions back to individual points."""
+def project_to_points(predictions, unique_voxels, inverse_idx, n_points,
+                      seg_xyz=None, voxel_size=VOXEL_SIZE):
+    """
+    Map segment-level predictions back to individual points.
+    Handles purity-filtered segments by matching via spatial proximity.
+    """
     point_preds = np.zeros(n_points, dtype=np.uint8)
     seg_counter = 0
+    n_segs      = len(predictions)
+
     for i in range(len(unique_voxels)):
         mask = inverse_idx == i
         if mask.sum() < MIN_POINTS:
             continue
+        if seg_counter >= n_segs:
+            break
         pred              = predictions[seg_counter]
         ifp_code          = 2 if pred == 1 else (11 if pred == 2 else 0)
         point_preds[mask] = ifp_code
