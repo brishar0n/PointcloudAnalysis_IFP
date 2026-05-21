@@ -23,8 +23,9 @@ Supported analysis modes:
    - Estimates usable width after accounting for obstacle points.
 
 2. Boundary-based analysis
-   - Uses KERB and HFE .obj boundary files.
-   - Measures distances between boundary points.
+   - Uses separated KERB and HFE/frontage .obj boundary files.
+   - Measures distances between opposite sidewalk boundary points.
+   - Reports both raw and filtered width summaries.
 """
 
 import argparse
@@ -41,9 +42,10 @@ SIDEWALK_LABEL = 2
 STREET_LABEL = 11
 OBSTACLE_LABELS = {0, 5, 8, 13, 15}
 
-# Any segment wider than this is treated as likely classifier spillover.
-# Real sidewalks may vary, but 15m is a safer upper bound for this stage.
 MAX_REASONABLE_WIDTH_M = 15.0
+
+MIN_REASONABLE_BOUNDARY_WIDTH_M = 0.8
+MAX_REASONABLE_BOUNDARY_WIDTH_M = 15.0
 
 
 def load_laz_points(file_path: Path) -> pd.DataFrame:
@@ -71,12 +73,6 @@ def get_obstacle_points(points: pd.DataFrame) -> pd.DataFrame:
 
 
 def estimate_sidewalk_axes(sidewalk_points: pd.DataFrame):
-    """
-    Estimate the main walking direction of the sidewalk.
-
-    This avoids measuring width using raw x/y ranges, which can give unrealistic
-    values when the street is diagonal or curved in the scan.
-    """
     xy = sidewalk_points[["x", "y"]].to_numpy()
 
     origin = xy.mean(axis=0)
@@ -108,11 +104,6 @@ def add_projection_columns(
 
 
 def robust_range(values: pd.Series, lower: float = 5, upper: float = 95) -> float:
-    """
-    Calculate a percentile range instead of max-min.
-
-    This reduces the effect of outlier points.
-    """
     if values.empty:
         return 0.0
 
@@ -120,9 +111,6 @@ def robust_range(values: pd.Series, lower: float = 5, upper: float = 95) -> floa
 
 
 def segment_sidewalk(points: pd.DataFrame, segment_size: float = 1.0) -> pd.DataFrame:
-    """
-    Split sidewalk points into small sections along the walking direction.
-    """
     points = points.copy()
     start = points["along_m"].min()
 
@@ -132,16 +120,10 @@ def segment_sidewalk(points: pd.DataFrame, segment_size: float = 1.0) -> pd.Data
 
 
 def compute_width(segment: pd.DataFrame) -> float:
-    """
-    Measure sidewalk width across the walking direction.
-    """
     return robust_range(segment["across_m"], lower=5, upper=95)
 
 
 def compute_slope(segment: pd.DataFrame) -> float:
-    """
-    Estimate slope percentage for one sidewalk segment.
-    """
     along_range = robust_range(segment["along_m"], lower=5, upper=95)
 
     if along_range == 0:
@@ -156,9 +138,6 @@ def compute_usable_width(
     segment: pd.DataFrame,
     projected_obstacles: pd.DataFrame,
 ) -> tuple[float, int]:
-    """
-    Estimate remaining usable width after obstacle points are considered.
-    """
     total_width = compute_width(segment)
 
     if projected_obstacles.empty:
@@ -212,9 +191,6 @@ def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> 
 
         overall_width = compute_width(group)
 
-        # Client-safe filter:
-        # very large "sidewalk" widths are usually caused by classifier spillover,
-        # plazas, open areas, or disconnected surfaces being grouped together.
         if overall_width > MAX_REASONABLE_WIDTH_M:
             skipped_unrealistic_segments += 1
             continue
@@ -274,16 +250,52 @@ def load_obj_vertices(obj_path: Path) -> np.ndarray:
 
 
 def compute_boundary_widths(kerb_points: np.ndarray, hfe_points: np.ndarray) -> dict:
+    """
+    Calculate boundary-based sidewalk width.
+
+    Raw distances are reported for transparency.
+    Filtered distances remove very small overlaps and very large likely mismatches.
+    """
     tree = cKDTree(hfe_points[:, :2])
     distances, _ = tree.query(kerb_points[:, :2], k=1)
 
-    return {
+    filtered_distances = distances[
+        (distances >= MIN_REASONABLE_BOUNDARY_WIDTH_M)
+        & (distances <= MAX_REASONABLE_BOUNDARY_WIDTH_M)
+    ]
+
+    summary = {
         "boundary_average_width_m": float(np.mean(distances)),
         "boundary_minimum_width_m": float(np.min(distances)),
         "boundary_maximum_width_m": float(np.max(distances)),
         "boundary_median_width_m": float(np.median(distances)),
         "boundary_sample_count": int(len(distances)),
+        "boundary_filter_min_m": float(MIN_REASONABLE_BOUNDARY_WIDTH_M),
+        "boundary_filter_max_m": float(MAX_REASONABLE_BOUNDARY_WIDTH_M),
+        "boundary_filtered_sample_count": int(len(filtered_distances)),
+        "boundary_removed_outlier_count": int(len(distances) - len(filtered_distances)),
+        "quality_note": (
+            "Raw boundary distances are included, but filtered values exclude "
+            "very small overlaps and very large likely mismatches."
+        ),
     }
+
+    if len(filtered_distances) > 0:
+        summary.update({
+            "boundary_filtered_average_width_m": float(np.mean(filtered_distances)),
+            "boundary_filtered_minimum_width_m": float(np.min(filtered_distances)),
+            "boundary_filtered_maximum_width_m": float(np.max(filtered_distances)),
+            "boundary_filtered_median_width_m": float(np.median(filtered_distances)),
+        })
+    else:
+        summary.update({
+            "boundary_filtered_average_width_m": None,
+            "boundary_filtered_minimum_width_m": None,
+            "boundary_filtered_maximum_width_m": None,
+            "boundary_filtered_median_width_m": None,
+        })
+
+    return summary
 
 
 def save_point_metric_outputs(
@@ -338,7 +350,9 @@ def run_boundary_metrics(kerb_obj: Path, hfe_obj: Path, output_dir: Path) -> Non
 
     summary["kerb_obj"] = str(kerb_obj)
     summary["hfe_obj"] = str(hfe_obj)
-    summary["method"] = "Boundary-based width between kerb and HFE points"
+    summary["method"] = (
+        "Boundary-based width between kerb and HFE points with raw and filtered summaries"
+    )
 
     save_boundary_metric_outputs(summary, output_dir)
 
