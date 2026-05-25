@@ -2,6 +2,8 @@ import argparse
 import run_preprocessing
 import subprocess
 import sys
+import os 
+
 def preprocessing(args):
     target_output = f"classification/preprocessed/{args.city}"
     
@@ -33,6 +35,9 @@ def classification(args):
     class_cmd = [sys.executable, "run_pipeline.py"]
     if args.all: 
         class_cmd.append("--all")
+        if args.cities is not None:
+            class_cmd.append("--cities")
+            class_cmd.extend(args.cities)
     if args.loco:
         class_cmd.append("--loco")
     if args.train:
@@ -46,6 +51,37 @@ def classification(args):
         class_cmd.extend(["--epochs",str(args.epochs)])
     
     subprocess.run(class_cmd, cwd="classification", check=True)
+    
+    # TODO MAKE SURE THAT USER IS ABLE TO APPLY THEIR OWN MODEL
+    
+def boundary_extraction(args):
+    
+    print("\n--- STEP 3: Boundary Extraction---")
+    
+    input_path=f"./classification/classified/{args.city}_mlp_classified.laz"
+    # input_path = args.input_processing
+    abs_input_path = os.path.abspath(input_path)
+    
+    class_cmd = [sys.executable, "extract_sidewalk_boundary.py"]
+    # if args.input_processing: 
+    class_cmd.extend(["--input-processing",str(abs_input_path)])
+    if args.voxel_size: 
+        class_cmd.extend(["--voxel-size",str(args.voxel_size)])
+    if args.alpha:
+        class_cmd.extend(["--alpha",str(args.alpha)])
+    if args.smooth_window:
+        class_cmd.extend(["--smooth-window",str(args.smooth_window)])
+    if args.rdp_epsilon:
+        class_cmd.extend(["--rdp-epsilon",str(args.rdp_epsilon)])
+    if args.min_length:
+        class_cmd.extend(["--min-length",str(args.min_length)])
+    if args.close_gap:
+        class_cmd.extend(["--close-gap",str(args.close_gap)])
+    if args.stitch_gap:
+        class_cmd.extend(["--stitch-gap",str(args.stitch_gap)])
+    
+    subprocess.run(class_cmd, cwd="./processing", check=True)
+    
     
 def main():
     parser = argparse.ArgumentParser(description="Main Pipeline")
@@ -99,11 +135,21 @@ def main():
         default=50,
         help="Training epochs for LOCO and final model (default: 50)"
     )
+    parser.add_argument("--input-processing", default=None, help="Classified LAZ file")
+    parser.add_argument("--voxel-size",    type=float, default=0.25)
+    parser.add_argument("--alpha",         type=float, default=0.3)
+    parser.add_argument("--smooth-window", type=int,   default=25)
+    parser.add_argument("--rdp-epsilon",   type=float, default=0.5)
+    parser.add_argument("--min-length",    type=float, default=15.0)
+    parser.add_argument("--close-gap",     type=float, default=8.0)
+    parser.add_argument("--stitch-gap",    type=float, default=6.0)
     
     args = parser.parse_args()
     
+    
     preprocessing(args)
     classification(args)
+    boundary_extraction(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
