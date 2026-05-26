@@ -69,21 +69,47 @@ def boundary_extraction(args):
         class_cmd.extend(["--voxel-size",str(args.voxel_size)])
     if args.alpha:
         class_cmd.extend(["--alpha",str(args.alpha)])
-    if args.smooth_window:
-        class_cmd.extend(["--smooth-window",str(args.smooth_window)])
-    if args.rdp_epsilon:
-        class_cmd.extend(["--rdp-epsilon",str(args.rdp_epsilon)])
-    if args.min_length:
-        class_cmd.extend(["--min-length",str(args.min_length)])
-    if args.close_gap:
-        class_cmd.extend(["--close-gap",str(args.close_gap)])
-    if args.stitch_gap:
-        class_cmd.extend(["--stitch-gap",str(args.stitch_gap)])
+    if args.slice_step:
+        class_cmd.extend(["--slice-step",str(args.slice_step)])
+    if args.straightness:
+        class_cmd.extend(["--straightness",str(args.straightness)])
+    if args.edge_percentile:
+        class_cmd.extend(["--edge-percentile",str(args.edge_percentile)])
+    if args.cluster_dist:
+        class_cmd.extend(["--cluster-dist",str(args.cluster_dist)])
+    if args.merge_dist:
+        class_cmd.extend(["--merge-dist",str(args.merge_dist)])
+    if args.street_label:
+        class_cmd.extend(["--street-label",str(args.street_label)])
+    if args.interactive:
+        class_cmd.extend(["--interactive",str(args.interactive)])
     
     subprocess.run(class_cmd, cwd="./processing", check=True)
     
+def width_calc(args):
+    # SEE THE OUTPUT FOLDER CONFIG - IF YOU WANT TO REMOVE IT OR NOT
+    print("\n--- STEP 4: Width Metrics Calculation  ---")
+    
+    input_path=f"./classification/classified/{args.city}_mlp_classified.laz"
+    # input_path = args.input_processing
+    abs_input_path = os.path.abspath(input_path)
+    print(f'Getting file: {abs_input_path}')
+    
+    class_cmd = [sys.executable, "width_metrics.py"]
+    # if args.input_processing: 
+    class_cmd.extend(["--input-metric",str(abs_input_path)])
+    if args.kerb_obj: 
+        class_cmd.extend(["--kerb-obj",str(args.kerb_obj)])
+    if args.hfe_obj:
+        class_cmd.extend(["--hfe-obj",str(args.hfe_obj)])
+    if args.segment_size:
+        class_cmd.extend(["--segment-size",str(args.segment_size)])
+    
+    subprocess.run(class_cmd, cwd="./metrics", check=True)
     
 def main():
+    STREET_LABEL   = 11
+    
     parser = argparse.ArgumentParser(description="Main Pipeline")
     parser.add_argument("input", 
                         help="Path to input .LAZ or .LAS file")
@@ -135,21 +161,52 @@ def main():
         default=50,
         help="Training epochs for LOCO and final model (default: 50)"
     )
+    
+    # Tags used for boundary extraction
     parser.add_argument("--input-processing", default=None, help="Classified LAZ file")
     parser.add_argument("--voxel-size",    type=float, default=0.25)
     parser.add_argument("--alpha",         type=float, default=0.3)
-    parser.add_argument("--smooth-window", type=int,   default=25)
-    parser.add_argument("--rdp-epsilon",   type=float, default=0.5)
-    parser.add_argument("--min-length",    type=float, default=15.0)
-    parser.add_argument("--close-gap",     type=float, default=8.0)
-    parser.add_argument("--stitch-gap",    type=float, default=6.0)
+    parser.add_argument("--slice-step", type=int,   default=0.5)
+    parser.add_argument("--straightness",   type=float, default=1.5)
+    parser.add_argument("--edge-percentile",    type=float, default=2.0)
+    parser.add_argument("--cluster-dist",     type=float, default=2.5)
+    parser.add_argument("--merge-dist",    type=float, default=8.0)
+    parser.add_argument("--street-label",    type=int, default=STREET_LABEL)
+    parser.add_argument("--interactive", action="store_true")
+    
+    # Tags used for width_metrics
+    parser.add_argument(
+        "--input-metric",
+        help="Classified LAZ/LAS file for point-based metrics.",
+    )
+    parser.add_argument(
+        "--kerb-obj",
+        help="Kerb boundary OBJ file from boundary extraction.",
+    )
+    parser.add_argument(
+        "--hfe-obj",
+        help="HFE boundary OBJ file from boundary extraction.",
+    )
+    # parser.add_argument(
+    #     "-o",
+    #     "--output",
+    #     default="outputs/width_metrics",
+    #     help="Output directory.",
+    # )
+    parser.add_argument(
+        "--segment-size",
+        type=float,
+        default=1.0,
+        help="Segment size in metres for point-based metrics.",
+    )
     
     args = parser.parse_args()
     
     
-    preprocessing(args)
-    classification(args)
+    # preprocessing(args)
+    # classification(args)
     boundary_extraction(args)
+    width_calc(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
