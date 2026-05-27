@@ -13,6 +13,15 @@ Boundary points farther from street-class points are treated as frontage/HFE-sid
 
 This script is designed to work with any classified LAS/LAZ file and any
 combined boundary LAS/LAZ file.
+
+Outputs:
+- sidewalk_boundary_kerb.obj
+- sidewalk_boundary_hfe.obj
+- sidewalk_boundary_kerb.las
+- sidewalk_boundary_hfe.las
+
+The OBJ files are used by the width metrics module.
+The LAS files are easier to open and visualise in CloudCompare.
 """
 
 import argparse
@@ -25,14 +34,26 @@ from scipy.spatial import cKDTree
 
 STREET_LABEL = 11
 
+KERB_VIS_LABEL = 21
+HFE_VIS_LABEL = 22
+
 
 def load_points_from_las(path: Path) -> tuple[np.ndarray, laspy.LasData]:
+    """
+    Load point coordinates from a LAS/LAZ file.
+    """
     las = laspy.read(path)
     points = np.column_stack((las.x, las.y, las.z))
     return points, las
 
 
 def get_street_points(classified_las: laspy.LasData, street_label: int) -> np.ndarray:
+    """
+    Extract street/road points from the classified point cloud.
+
+    These street points are used as a reference to decide which boundary points
+    are closer to the road side.
+    """
     labels = np.asarray(classified_las.classification)
     mask = labels == street_label
 
@@ -91,6 +112,28 @@ def save_obj(points: np.ndarray, output_path: Path, name: str) -> None:
     print(f"Saved {name}: {output_path} ({len(points):,} points)")
 
 
+def save_las(points: np.ndarray, output_path: Path, classification: int) -> None:
+    """
+    Save separated boundary points as a LAS file for CloudCompare visualisation.
+
+    Different classification values are used so kerb and HFE/frontage sides
+    can be visually distinguished after loading.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    header = laspy.LasHeader(point_format=0, version="1.2")
+    las = laspy.LasData(header)
+
+    las.x = points[:, 0]
+    las.y = points[:, 1]
+    las.z = points[:, 2]
+    las.classification = np.full(len(points), classification, dtype=np.uint8)
+
+    las.write(str(output_path))
+
+    print(f"Saved LAS visualisation file: {output_path} ({len(points):,} points)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Separate combined sidewalk boundary into kerb and HFE/frontage sides."
@@ -109,7 +152,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default="outputs",
-        help="Output directory for separated OBJ files.",
+        help="Output directory for separated boundary files.",
     )
     parser.add_argument(
         "--street-label",
@@ -145,22 +188,42 @@ def main() -> None:
     print(f"Kerb-side points:        {len(kerb_points):,}")
     print(f"HFE/frontage points:     {len(hfe_points):,}")
 
+    kerb_obj_path = output_dir / "sidewalk_boundary_kerb.obj"
+    hfe_obj_path = output_dir / "sidewalk_boundary_hfe.obj"
+
+    kerb_las_path = output_dir / "sidewalk_boundary_kerb.las"
+    hfe_las_path = output_dir / "sidewalk_boundary_hfe.las"
+
     save_obj(
         kerb_points,
-        output_dir / "sidewalk_boundary_kerb.obj",
+        kerb_obj_path,
         "Kerb-side sidewalk boundary",
     )
 
     save_obj(
         hfe_points,
-        output_dir / "sidewalk_boundary_hfe.obj",
+        hfe_obj_path,
         "HFE/frontage-side sidewalk boundary",
+    )
+
+    save_las(
+        kerb_points,
+        kerb_las_path,
+        classification=KERB_VIS_LABEL,
+    )
+
+    save_las(
+        hfe_points,
+        hfe_las_path,
+        classification=HFE_VIS_LABEL,
     )
 
     print("\nDone.")
     print("Generated:")
-    print(f" - {output_dir / 'sidewalk_boundary_kerb.obj'}")
-    print(f" - {output_dir / 'sidewalk_boundary_hfe.obj'}")
+    print(f" - {kerb_obj_path}")
+    print(f" - {hfe_obj_path}")
+    print(f" - {kerb_las_path}")
+    print(f" - {hfe_las_path}")
 
 
 if __name__ == "__main__":
