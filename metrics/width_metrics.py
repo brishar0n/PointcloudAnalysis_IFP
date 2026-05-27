@@ -4,28 +4,6 @@ from __future__ import annotations
 width_metrics.py
 
 Sujeeth Gunasekaran - Width Metrics / Analysis
-
-This file calculates practical sidewalk access measurements from the point cloud
-pipeline used in the IFP pedestrian access project.
-
-The goal is to produce useful sidewalk metrics for pedestrian access analysis,
-while avoiding unrealistic results caused by noisy classification or large open
-areas being labelled as sidewalk.
-
-Supported analysis modes:
-
-1. Point-based analysis
-   - Uses classified .laz/.las files.
-   - Uses sidewalk-labelled points to estimate walking direction.
-   - Measures width across the sidewalk using PCA projection.
-   - Uses percentile ranges to reduce the impact of outliers.
-   - Filters out unrealistic width segments above a safe threshold.
-   - Estimates usable width after accounting for obstacle points.
-
-2. Boundary-based analysis
-   - Uses separated KERB and HFE/frontage .obj boundary files.
-   - Measures distances between opposite sidewalk boundary points.
-   - Reports both raw and filtered width summaries.
 """
 
 import argparse
@@ -43,7 +21,6 @@ STREET_LABEL = 11
 OBSTACLE_LABELS = {0, 5, 8, 13, 15}
 
 MAX_REASONABLE_WIDTH_M = 15.0
-
 MIN_REASONABLE_BOUNDARY_WIDTH_M = 0.8
 MAX_REASONABLE_BOUNDARY_WIDTH_M = 15.0
 
@@ -74,7 +51,6 @@ def get_obstacle_points(points: pd.DataFrame) -> pd.DataFrame:
 
 def estimate_sidewalk_axes(sidewalk_points: pd.DataFrame):
     xy = sidewalk_points[["x", "y"]].to_numpy()
-
     origin = xy.mean(axis=0)
     centred = xy - origin
 
@@ -113,9 +89,7 @@ def robust_range(values: pd.Series, lower: float = 5, upper: float = 95) -> floa
 def segment_sidewalk(points: pd.DataFrame, segment_size: float = 1.0) -> pd.DataFrame:
     points = points.copy()
     start = points["along_m"].min()
-
     points["segment_id"] = ((points["along_m"] - start) / segment_size).astype(int)
-
     return points
 
 
@@ -130,7 +104,6 @@ def compute_slope(segment: pd.DataFrame) -> float:
         return 0.0
 
     z_range = robust_range(segment["z"], lower=5, upper=95)
-
     return float((z_range / along_range) * 100)
 
 
@@ -249,13 +222,30 @@ def load_obj_vertices(obj_path: Path) -> np.ndarray:
     return np.asarray(vertices)
 
 
-def compute_boundary_widths(kerb_points: np.ndarray, hfe_points: np.ndarray) -> dict:
+def load_boundary_points(boundary_path: Path) -> np.ndarray:
     """
-    Calculate boundary-based sidewalk width.
+    Load boundary points from OBJ, LAS, or LAZ files.
+    """
+    suffix = boundary_path.suffix.lower()
 
-    Raw distances are reported for transparency.
-    Filtered distances remove very small overlaps and very large likely mismatches.
-    """
+    if suffix == ".obj":
+        return load_obj_vertices(boundary_path)
+
+    if suffix in {".las", ".laz"}:
+        las = laspy.read(boundary_path)
+        return np.column_stack((
+            np.asarray(las.x),
+            np.asarray(las.y),
+            np.asarray(las.z),
+        ))
+
+    raise ValueError(
+        f"Unsupported boundary file format: {boundary_path}. "
+        "Use .obj, .las, or .laz."
+    )
+
+
+def compute_boundary_widths(kerb_points: np.ndarray, hfe_points: np.ndarray) -> dict:
     tree = cKDTree(hfe_points[:, :2])
     distances, _ = tree.query(kerb_points[:, :2], k=1)
 
@@ -342,16 +332,16 @@ def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -
     save_point_metric_outputs(metrics, summary, output_dir)
 
 
-def run_boundary_metrics(kerb_obj: Path, hfe_obj: Path, output_dir: Path) -> None:
-    kerb_points = load_obj_vertices(kerb_obj)
-    hfe_points = load_obj_vertices(hfe_obj)
+def run_boundary_metrics(kerb_file: Path, hfe_file: Path, output_dir: Path) -> None:
+    kerb_points = load_boundary_points(kerb_file)
+    hfe_points = load_boundary_points(hfe_file)
 
     summary = compute_boundary_widths(kerb_points, hfe_points)
 
-    summary["kerb_obj"] = str(kerb_obj)
-    summary["hfe_obj"] = str(hfe_obj)
+    summary["kerb_file"] = str(kerb_file)
+    summary["hfe_file"] = str(hfe_file)
     summary["method"] = (
-        "Boundary-based width between kerb and HFE points with raw and filtered summaries"
+        "Boundary-based width between kerb/KI and HFE points with raw and filtered summaries"
     )
 
     save_boundary_metric_outputs(summary, output_dir)
@@ -367,12 +357,12 @@ def main() -> None:
         help="Classified LAZ/LAS file for point-based metrics.",
     )
     parser.add_argument(
-        "--kerb-obj",
-        help="Kerb boundary OBJ file from boundary extraction.",
+        "--kerb-file",
+        help="Kerb/KI boundary file from boundary extraction. Supports .obj, .las, or .laz.",
     )
     parser.add_argument(
-        "--hfe-obj",
-        help="HFE boundary OBJ file from boundary extraction.",
+        "--hfe-file",
+        help="HFE/frontage boundary file from boundary extraction. Supports .obj, .las, or .laz.",
     )
     parser.add_argument(
         "-o",
@@ -391,7 +381,7 @@ def main() -> None:
     output_dir = Path(args.output)
 
     has_point_input = args.input is not None
-    has_boundary_input = args.kerb_obj is not None and args.hfe_obj is not None
+    has_boundary_input = args.kerb_file is not None and args.hfe_file is not None
 
     if has_point_input:
         run_point_metrics(
@@ -402,15 +392,15 @@ def main() -> None:
 
     if has_boundary_input:
         run_boundary_metrics(
-            kerb_obj=Path(args.kerb_obj),
-            hfe_obj=Path(args.hfe_obj),
+            kerb_file=Path(args.kerb_file),
+            hfe_file=Path(args.hfe_file),
             output_dir=output_dir,
         )
 
     if not has_point_input and not has_boundary_input:
         raise ValueError(
             "Please provide either --input for point-based metrics, "
-            "or both --kerb-obj and --hfe-obj for boundary-based metrics."
+            "or both --kerb-file and --hfe-file for boundary-based metrics."
         )
 
 
