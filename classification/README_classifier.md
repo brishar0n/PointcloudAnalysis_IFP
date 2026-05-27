@@ -93,12 +93,12 @@ Segment predictions are mapped back to individual points and saved as a `.laz` f
 
 ## Automatic Label Detection
 
-`dl_apply_model.py` automatically detects whether a city has ground truth labels by checking if more than 1% of points have sidewalk (code 2) or street (code 11) classifications.
+`dl_apply_model.py` automatically detects whether a city has ground truth labels by checking if more than 1% of points have both sidewalk (code 2) AND street (code 11) classifications.
 
 | City has labels | Path taken |
 |---|---|
 | Yes (Riga, Vilnius, Warsaw) | Apply model directly |
-| No (Utrecht, Bologna) | CSF + MLP + fine-tune + cleanup |
+| No (Utrecht, Bologna) | CSF + MLP + pseudo-label fine-tuning + cleanup |
 
 Output filename is always `classified/{city}_mlp_classified.laz` regardless of path.
 
@@ -118,12 +118,32 @@ LOCO (Leave-One-City-Out) trains on 2 cities and tests on the 3rd, repeated for 
 
 ## Results
 
-| Model | LOCO Balanced Acc | Sidewalk F1 |
+| Model | Val Balanced Acc | Sidewalk F1 |
 |---|---|---|
 | Random Forest | 68.8% | 0.460 |
-| MLP (this module) | 71.2% | 0.576 |
+| Single-stage MLP | 71.2% | 0.576 |
+| MLP + CSF + pseudo-label fine-tuning (this module) | 80.3% | 0.663 |
 
-MLP achieves 25% better sidewalk F1 than RF in cross-city evaluation.
+Utrecht applied result: ~10% sidewalk, ~10% street — visually clean separation.
+
+---
+
+## Development History
+
+The pipeline went through several iterations:
+
+| Phase | Approach | Key change | Result |
+|---|---|---|---|
+| 1 | Random Forest | Balanced subsample weights | F1 0.460 |
+| 2 | Single-stage MLP | Class weights + undersampling | F1 0.576 |
+| 3 | PointNet | 3D deep learning | Dropped — GPU required, slower than MLP |
+| 4 | MLP + James feedback | CSF filter, purity 85%, SHAP analysis | Utrecht 6.7% sidewalk |
+| 5 | MLP + pseudo-label fine-tuning | Self-supervised adaptation for unlabelled cities | Utrecht 7.5% sidewalk |
+
+**Key findings from SHAP analysis:**
+- `intensity_normalized` is the top differentiator — street (dark asphalt) has lower intensity than sidewalk (lighter concrete)
+- `planarity` at multiple scales separates flat ground from buildings/trees
+- `height_division` separates ground-level from elevated structures
 
 ---
 
@@ -131,11 +151,11 @@ MLP achieves 25% better sidewalk F1 than RF in cross-city evaluation.
 
 | City | Points | Labels | Used For |
 |---|---|---|---|
-| Riga | 5.0M | Yes | Training + LOCO |
-| Vilnius | 7.8M | Yes | Training + LOCO |
-| Warsaw | 2.9M | Yes | Training + LOCO |
-| Utrecht | 6.5M | No | Apply only |
-| Bologna | 14.2M | No | Apply only |
+| Riga | 1.5M | Yes (18.9% SW, 25.2% ST) | Training + LOCO |
+| Vilnius | 3.8M | Yes (12.6% SW, 19.2% ST) | Training + LOCO |
+| Warsaw | 1.5M | Yes (26.0% SW, 29.1% ST) | Training + LOCO |
+| Bologna | 5.0M | Yes (9.7% SW, 19.0% ST) | Apply only (different scanner — excluded from training) |
+| Utrecht | 3.5M | No | Apply only (unlabelled — uses pseudo-label fine-tuning) |
 
 ---
 
