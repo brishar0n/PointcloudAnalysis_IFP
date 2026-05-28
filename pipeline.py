@@ -96,6 +96,7 @@ def boundary_extraction(args):
     subprocess.run(class_cmd, cwd="./processing", check=True)
     
 def width_calc(args):
+    # SEE THE OUTPUT FOLDER CONFIG - IF YOU WANT TO REMOVE IT OR NOT
     print("\n--- STEP 4: Width Metrics Calculation  ---")
     
     if args.input_metric:
@@ -178,7 +179,6 @@ def main():
     parser.add_argument(
         "--cities",
         nargs="+",
-        # default=["utrecht", "bologna"],
         metavar="CITY",
         help="Cities to apply the model to (default: utrecht bologna)"
     )
