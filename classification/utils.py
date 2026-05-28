@@ -31,7 +31,7 @@ from sklearn.neighbors import KDTree
 
 # ── Constants ─────────────────────────────────────────────────────────────
 SEED             = 42
-SAMPLE_SIZE      = 250_000
+SAMPLE_SIZE      = 650_000
 VOXEL_SIZE       = 0.6      # metres — size of each superpoint square
 MIN_POINTS       = 8        # minimum points per segment
 N_NEIGHBORS      = 64       # context neighbours (optimised from 8,16,32,64,128)
@@ -63,6 +63,32 @@ np.random.seed(SEED)
 
 
 # ── Functions ─────────────────────────────────────────────────────────────
+
+def get_common_features(city_names, preprocessed_dir="preprocessed"):
+    """
+    Compute intersection of feature names across all cities.
+    Returns features common to ALL cities in the order they appear
+    in the city with fewest features — ensures consistent alignment
+    across cities with different preprocessing (e.g. Bologna has 49 vs 41).
+    """
+    base_dir   = os.path.dirname(os.path.abspath(__file__))
+    city_feats = {}
+    for city in city_names:
+        path = os.path.join(base_dir, preprocessed_dir, city, "low_featured.laz")
+        las  = laspy.read(path)
+        feat_names = [n for n in las.point_format.dimension_names
+                      if n not in SKIP_FIELDS]
+        city_feats[city] = feat_names
+
+    # Use city with fewest features as reference order
+    ref_city   = min(city_feats, key=lambda c: len(city_feats[c]))
+    ref_order  = city_feats[ref_city]
+    common_set = set.intersection(*[set(f) for f in city_feats.values()])
+    common     = [f for f in ref_order if f in common_set]
+    print(f"  Common features across {city_names}: {len(common)} "
+          f"(reference: {ref_city})")
+    return common
+
 
 def load_city(city_name):
     """
@@ -165,7 +191,7 @@ def build_segments(xyz_s, labels_s, features_s, purity_thresh=PURITY_THRESH):
     voxel_keys                 = voxel_coords[:, 0] * 1_000_000 + voxel_coords[:, 1]
     unique_voxels, inverse_idx = np.unique(voxel_keys, return_inverse=True)
 
-    seg_xyz, seg_feats, seg_labels, seg_purity = [], [], [], []
+    seg_xyz, seg_feats, seg_labels, seg_purity, seg_voxel_ids = [], [], [], [], []
 
     for i in range(len(unique_voxels)):
         mask = inverse_idx == i
@@ -181,27 +207,31 @@ def build_segments(xyz_s, labels_s, features_s, purity_thresh=PURITY_THRESH):
         seg_feats.append(feats.mean(axis=0))
         seg_labels.append(unique_lbls[np.argmax(counts)])
         seg_purity.append(purity)
+        seg_voxel_ids.append(i)  # track which unique_voxel index this segment maps to
 
-    seg_xyz    = np.array(seg_xyz)
-    seg_feats  = np.array(seg_feats)
-    seg_labels = np.array(seg_labels)
-    seg_purity = np.array(seg_purity)
+    seg_xyz       = np.array(seg_xyz)
+    seg_feats     = np.array(seg_feats)
+    seg_labels    = np.array(seg_labels)
+    seg_purity    = np.array(seg_purity)
+    seg_voxel_ids = np.array(seg_voxel_ids, dtype=np.int32)
 
     # Apply purity filter — only for labelled segments (skip if all other)
+    # seg_voxel_ids keeps track of which voxels survive so projection stays correct
     has_labels = np.isin(seg_labels, [1, 2]).any()
     if has_labels and purity_thresh > 0:
-        pure_mask  = seg_purity >= purity_thresh
-        removed    = (~pure_mask).sum()
-        seg_xyz    = seg_xyz[pure_mask]
-        seg_feats  = seg_feats[pure_mask]
-        seg_labels = seg_labels[pure_mask]
+        pure_mask     = seg_purity >= purity_thresh
+        removed       = (~pure_mask).sum()
+        seg_xyz       = seg_xyz[pure_mask]
+        seg_feats     = seg_feats[pure_mask]
+        seg_labels    = seg_labels[pure_mask]
+        seg_voxel_ids = seg_voxel_ids[pure_mask]
         print(f"  Segments: {len(seg_xyz):,} "
               f"(purity filter removed {removed:,} boundary segments "
               f"< {purity_thresh*100:.0f}% pure)")
     else:
         print(f"  Segments: {len(seg_xyz):,}")
 
-    return seg_xyz, seg_feats, seg_labels, unique_voxels, inverse_idx
+    return seg_xyz, seg_feats, seg_labels, unique_voxels, inverse_idx, seg_voxel_ids
 
 
 def add_context_features(seg_xyz, seg_feats):
@@ -260,7 +290,8 @@ def process_city(city_name):
                                                         xyz, labels, features, feat_names,
                                                         training=True)
     seg_xyz, seg_feats, seg_labels, \
-        unique_voxels, inverse_idx                 = build_segments(
+        unique_voxels, inverse_idx, \
+        seg_voxel_ids                              = build_segments(
                                                         xyz_s, labels_s, features_s)
     X, nbr_indices                                 = add_context_features(
                                                         seg_xyz, seg_feats)
@@ -273,6 +304,7 @@ def process_city(city_name):
         "xyz_s"        : xyz_s,
         "unique_voxels": unique_voxels,
         "inverse_idx"  : inverse_idx,
+        "seg_voxel_ids": seg_voxel_ids,
     }
 
 

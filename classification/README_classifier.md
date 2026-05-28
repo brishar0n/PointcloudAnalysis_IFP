@@ -2,7 +2,9 @@
 
 **PIC: Vency Khunt**
 
-Classifies LiDAR point cloud data into three categories — **street**, **sidewalk**, and **other** — using a deep learning MLP pipeline trained on voxel segment features.
+Classifies LiDAR point cloud data into **sidewalk**, **street**, and **other** using a deep learning MLP pipeline trained on voxel segment features.
+
+Output `.laz` files go to Ahmed for boundary extraction.
 
 ---
 
@@ -11,16 +13,16 @@ Classifies LiDAR point cloud data into three categories — **street**, **sidewa
 ```
 classification/
 ├── utils.py                    # Shared pipeline functions
-├── eval_utils.py               # Evaluation helpers (metrics, confusion, confidence)
-├── dl_classifier.py            # Single city training and evaluation
+├── eval_utils.py               # Evaluation helpers
+├── dl_classifier.py            # MLP model definition and training functions
 ├── dl_loco_evaluation.py       # LOCO cross-city evaluation
 ├── dl_train_final_model.py     # Train final model on all labelled cities
 ├── dl_apply_model.py           # Apply final model to any city
 ├── run_pipeline.py             # Single entry point — runs everything
-├── preprocessed/               # From Brigitte's preprocessing (NOT in git)
+├── preprocessed/               # Brigitte's preprocessed input (NOT in git)
 ├── models/                     # Saved model files (NOT in git)
 ├── classified/                 # Output .laz files (NOT in git)
-└── results/                    # Plots and CSV results (NOT in git)
+└── results/                    # Plots and evaluation results (NOT in git)
 ```
 
 ---
@@ -33,144 +35,102 @@ Python 3.9+
 pip install laspy[lazrs] numpy scipy scikit-learn torch matplotlib seaborn pandas joblib cloth-simulation-filter
 ```
 
-Place Brigitte's preprocessed output in `classification/preprocessed/<city>/` before running.
+Place Brigitte's preprocessed output at `preprocessed/<city>/low_featured.laz` before running.
+
+---
+
+## Input
+
+Each city's input is a single file: `preprocessed/<city>/low_featured.laz`
+
+This file contains XYZ coordinates plus precomputed geometric features per point (roughness, planarity, eigenvalues, height features, intensity, density etc.), produced by Brigitte's preprocessing step.
 
 ---
 
 ## How to Run
 
-Everything runs through `run_pipeline.py`. You do not need to call individual scripts directly.
+Everything runs through `run_pipeline.py`.
 
 ```bash
+# Train the model (run once)
+python run_pipeline.py --train --epochs 50
+
+# Apply to cities
+python run_pipeline.py --apply --cities <city-name>
+
+# Run LOCO cross-city evaluation
+python run_pipeline.py --loco --epochs 50
+
 # Run everything
 python run_pipeline.py --all --epochs 50
-
-# Run individual steps
-python run_pipeline.py --loco --epochs 50         # LOCO evaluation only
-python run_pipeline.py --train --epochs 50        # Train final model only
-python run_pipeline.py --apply --cities utrecht bologna  # Apply to cities
 ```
 
-The model only needs to be trained once. After that just use `--apply`.
+The model only needs to be trained once. After training, use `--apply` for each city.
 
 ---
 
-## What the Pipeline Does
-
-### Step 1 — Roughness Pre-filter
-Points with roughness > 0.05m are removed before training. Roads and sidewalks are smooth — rough points are cars, bushes, damaged surfaces. Reduces class imbalance at source.
-
-### Step 2 — CSF Geometry Filter (unlabelled cities only)
-For cities without ground truth labels (Utrecht, Bologna), a Cloth Simulation Filter (CSF) is applied first. CSF drops a virtual blanket over the inverted point cloud and keeps only flat ground points — removing buildings, trees, and vehicles before the model sees the data.
-
-### Step 3 — Voxel Superpoint Segmentation
-The XY plane is divided into 0.6m x 0.6m grid squares. All points in the same square form one superpoint with averaged features and majority-vote label. Reduces 250,000 points to roughly 3,000–12,000 segments per city.
-
-### Step 4 — Context Features
-Each superpoint gets the mean and standard deviation of its 64 nearest neighbour superpoints added as extra features. This triples the feature count from 41 to 123 per segment. Tested with 8, 16, 32, 64, and 128 neighbours — 64 gave the best sidewalk F1.
-
-### Step 5 — MLP Classification
-A 3-layer neural network classifies each segment into other / sidewalk / street. Class weights ensure the model pays extra attention to sidewalk (minority class).
+## Pipeline
 
 ```
-Input (123 features)
--> Dense(256) + BatchNorm + ReLU + Dropout(30%)
--> Dense(128) + BatchNorm + ReLU + Dropout(30%)
--> Dense(64)  + BatchNorm + ReLU + Dropout(20%)
--> Dense(3)   -> other / sidewalk / street
+preprocessed/<city>/low_featured.laz
+    │
+    ▼
+CSF (Cloth Simulation Filter)
+    Runs on the full point cloud before sampling.
+    Removes buildings, trees, vehicles — keeps ground only.
+    Non-ground points are labelled other (code 0) automatically.
+    │
+    ▼
+Sample 650k ground points + roughness filter (> 0.05m removed)
+    │
+    ▼
+Voxel segmentation (0.6m × 0.6m grid squares)
+    Points in each grid square → one segment (mean features, majority label)
+    Purity filter removes boundary segments < 85% label agreement
+    │
+    ▼
+Context features
+    Each segment gets mean + std of its 64 nearest neighbour segments
+    Features: 37 per-point × 3 (own + ctx_mean + ctx_std) = 111 total
+    │
+    ▼
+Binary MLP — sidewalk vs street
+    Input (111) → Dense(256)+BN+ReLU+Drop → Dense(128)+BN+ReLU+Drop
+               → Dense(64)+BN+ReLU+Drop → Dense(2)
+    │
+    ▼
+[Unlabelled cities only]
+    Pseudo-label fine-tuning — high confidence (≥ 95%) predictions
+    used to adapt model to target city (20 epochs, lr=0.0001)
+    Connected component filter — removes isolated sidewalk patches < 50 points
+    │
+    ▼
+classified/<city>_mlp_classified.laz
 ```
-
-### Step 6 — Pseudo-Label Fine-Tuning (unlabelled cities only)
-After initial classification, predictions with >= 95% confidence are used as pseudo-labels to fine-tune the model on the target city. No manual labelling required. The model self-improves on any new city.
-
-### Step 7 — Connected Component Filter (unlabelled cities only)
-Isolated sidewalk patches smaller than 50 points are removed. Real sidewalks are large continuous surfaces — small scattered patches are noise.
-
-### Step 8 — Projection Back to Points
-Segment predictions are mapped back to individual points and saved as a `.laz` file.
 
 ---
 
-## Automatic Label Detection
+## Labelled vs Unlabelled Cities
 
-`dl_apply_model.py` automatically detects whether a city has ground truth labels by checking if more than 1% of points have both sidewalk (code 2) AND street (code 11) classifications.
+`dl_apply_model.py` automatically detects whether a city has ground truth labels (> 1% sidewalk AND street points). No hardcoded city lists.
 
-| City has labels | Path taken |
+| City has labels | Path |
 |---|---|
-| Yes (Riga, Vilnius, Warsaw) | Apply model directly |
-| No (Utrecht, Bologna) | CSF + MLP + pseudo-label fine-tuning + cleanup |
-
-Output filename is always `classified/{city}_mlp_classified.laz` regardless of path.
+| Yes | Predict → evaluate against ground truth |
+| No  | Predict → pseudo-label fine-tune → connected component filter |
 
 ---
 
-## Train / Validation / Test Split
-
-| Split | How |
-|---|---|
-| Train | 60% — used to fit the model |
-| Validation | 20% — used to monitor training and save best model |
-| Test | LOCO — entire unseen city, stricter than random holdout |
-
-LOCO (Leave-One-City-Out) trains on 2 cities and tests on the 3rd, repeated for each city. This is the honest cross-city accuracy reported as the final test result.
-
----
-
-## Results
-
-| Model | Val Balanced Acc | Sidewalk F1 |
-|---|---|---|
-| Random Forest | 68.8% | 0.460 |
-| Single-stage MLP | 71.2% | 0.576 |
-| MLP + CSF + pseudo-label fine-tuning (this module) | 80.3% | 0.663 |
-
-Utrecht applied result: ~10% sidewalk, ~10% street — visually clean separation.
-
----
-
-## Development History
-
-The pipeline went through several iterations:
-
-| Phase | Approach | Key change | Result |
-|---|---|---|---|
-| 1 | Random Forest | Balanced subsample weights | F1 0.460 |
-| 2 | Single-stage MLP | Class weights + undersampling | F1 0.576 |
-| 3 | PointNet | 3D deep learning | Dropped — GPU required, slower than MLP |
-| 4 | MLP + James feedback | CSF filter, purity 85%, SHAP analysis | Utrecht 6.7% sidewalk |
-| 5 | MLP + pseudo-label fine-tuning | Self-supervised adaptation for unlabelled cities | Utrecht 7.5% sidewalk |
-
-**Key findings from SHAP analysis:**
-- `intensity_normalized` is the top differentiator — street (dark asphalt) has lower intensity than sidewalk (lighter concrete)
-- `planarity` at multiple scales separates flat ground from buildings/trees
-- `height_division` separates ground-level from elevated structures
-
----
-
-## Datasets
-
-| City | Points | Labels | Used For |
-|---|---|---|---|
-| Riga | 1.5M | Yes (18.9% SW, 25.2% ST) | Training + LOCO |
-| Vilnius | 3.8M | Yes (12.6% SW, 19.2% ST) | Training + LOCO |
-| Warsaw | 1.5M | Yes (26.0% SW, 29.1% ST) | Training + LOCO |
-| Bologna | 5.0M | Yes (9.7% SW, 19.0% ST) | Apply only (different scanner — excluded from training) |
-| Utrecht | 3.5M | No | Apply only (unlabelled — uses pseudo-label fine-tuning) |
-
----
-
-## Output Files
+## Output
 
 | File | Description |
 |---|---|
-| `classified/{city}_mlp_classified.laz` | Classified point cloud for Ahmed |
+| `classified/{city}_mlp_classified.laz` | Classified point cloud → Ahmed |
 | `models/final_mlp_classifier.pt` | Trained MLP weights |
 | `models/final_mlp_scaler.joblib` | Feature scaler |
-| `results/mlp_loco_results.csv` | LOCO summary table |
-| `results/*_confusion.png` | Confusion matrices |
-| `results/*_confidence.png` | Confidence histograms |
+| `models/common_feat_names.joblib` | Feature names used at training (for inference alignment) |
 
-**Classification codes in output .laz:**
+**Classification codes in output `.laz`:**
 
 | Code | Label |
 |---|---|
@@ -180,10 +140,24 @@ The pipeline went through several iterations:
 
 ---
 
+## Datasets
+
+| City | Points
+
+| Riga | 1.5M
+| Vilnius | 3.8M
+| Warsaw | 1.5M
+| Bologna | 5.0M
+| Utrecht | 3.5M 
+
+Bologna has 46 features vs 41 for other cities (different scanner preprocessing). Common features are selected automatically across all cities at training time.
+
+---
+
 ## Notes for Team
 
-**Ahmed (boundary extraction):** Input is `classified/{city}_mlp_classified.laz`. Run `run_pipeline.py --train` once, then `--apply --cities <city>` for each city you need.
+**Ahmed:** Input is `classified/{city}_mlp_classified.laz`. Run `--train` once, then `--apply --cities <city>` for each city.
 
-**Sujeeth (metrics):** Use Ahmed's boundary output — classification is upstream of your module.
+**Sujeeth:** Classification is upstream of your module — use Ahmed's boundary output.
 
-**Aaron (visualisation):** All `.laz` outputs open in CloudCompare with classification as a scalar field. Colour by classification to see other/sidewalk/street.
+**Aaron:** All `.laz` outputs open in CloudCompare. Colour by classification scalar field to see other/sidewalk/street.

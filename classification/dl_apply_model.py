@@ -1,3 +1,22 @@
+"""
+dl_apply_model.py — Apply trained binary MLP to classify a city.
+
+Pipeline (both paths):
+  CSF → sample ground-only → segments → binary MLP (sidewalk vs street)
+  Non-ground points (removed by CSF) are labelled other=0 automatically.
+
+Path A — Labelled city (has ground truth sidewalk + street labels):
+  Apply model directly, evaluate against ground truth.
+
+Path B — Unlabelled city (Utrecht etc.):
+  Same pipeline + pseudo-label fine-tuning on high-confidence predictions
+  + connected component filter to remove isolated noise patches.
+
+Output:
+  classified/{city}_mlp_classified.laz
+  Labels: 0=other, 2=sidewalk (IFP), 11=street (IFP)
+"""
+
 import numpy as np
 import laspy
 import joblib
@@ -15,82 +34,301 @@ try:
     CSF_AVAILABLE = True
 except ImportError:
     CSF_AVAILABLE = False
-    print("[WARNING]  CSF not installed. Run: pip install cloth-simulation-filter")
-    print("   Geometry filtering will be skipped.")
+    print("[WARNING] CSF not installed. Run: pip install cloth-simulation-filter")
 
 from utils import (
     SEED, SAMPLE_SIZE, VOXEL_SIZE, MIN_POINTS,
-    load_city, sample_and_filter, build_segments,
-    add_context_features
+    load_city, sample_and_filter, build_segments, add_context_features,
+    MODEL_SIDEWALK, MODEL_STREET, MODEL_OTHER
 )
-from dl_classifier import SidewalkMLP, predict_mlp
+from dl_classifier import SidewalkStreetMLP, predict_mlp_binary, predict_proba_binary
 
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-LABEL_THRESHOLD   = 0.01   # >1% non-zero -> city has ground truth labels
-LABELLED_CITIES   = ["riga", "vilnius", "warsaw"]
-CSF_CLOTH_SIZE    = 1.0    # cloth resolution in metres
-CSF_MAX_ITER      = 500    # cloth simulation iterations
-CSF_CLASS_THRESH  = 0.3    # ground/non-ground distance threshold
-MIN_COMPONENT_PTS = 50     # min sidewalk patch size to keep
+LABEL_THRESHOLD   = 0.01
+CSF_CLOTH_SIZE    = 0.5
+CSF_MAX_ITER      = 500
+CSF_CLASS_THRESH  = 0.3
+MIN_COMPONENT_PTS = 50
+
+
+# ── CSF ───────────────────────────────────────────────────────────────────
 
 def csf_ground_filter(xyz, cloth_size=CSF_CLOTH_SIZE):
     """
-    Apply Cloth Simulation Filter (CSF) — the blanket method.
-
-    Drops a virtual cloth over the inverted point cloud.
-    Points touching the cloth = ground (roads + sidewalks).
-    Points above the cloth = non-ground (buildings, trees, cars) -> removed.
-
-    Returns:
-        ground_mask : boolean array, True = ground point
+    Apply CSF to xyz. Returns boolean ground mask.
+    Non-ground points = other (code 0) in final output.
     """
     if not CSF_AVAILABLE:
-        print("  [WARNING]  CSF not available — skipping geometry filter")
+        print("  [WARNING] CSF not available — all points treated as ground")
         return np.ones(len(xyz), dtype=bool)
 
-    print("\n  Running CSF geometry filter (blanket method)...")
+    print(f"  Running CSF on {len(xyz):,} points...")
     csf = CSF.CSF()
-
-    # Parameters tuned for urban street-level TLS scans
-    csf.params.bSloopSmooth    = True   # smooth cloth on slopes
+    csf.params.bSloopSmooth     = True
     csf.params.cloth_resolution = cloth_size
-    csf.params.rigidness       = 2      # 1=steep, 2=normal, 3=flat
-    csf.params.time_step       = 0.65
-    csf.params.class_threshold = CSF_CLASS_THRESH
-    csf.params.interations     = CSF_MAX_ITER
-
+    csf.params.rigidness        = 2
+    csf.params.time_step        = 0.65
+    csf.params.class_threshold  = CSF_CLASS_THRESH
+    csf.params.interations      = CSF_MAX_ITER
     csf.setPointCloud(xyz.tolist())
-    ground_idx     = CSF.VecInt()
-    non_ground_idx = CSF.VecInt()
-    csf.do_filtering(ground_idx, non_ground_idx, exportCloth=False)
-
-    ground_mask = np.zeros(len(xyz), dtype=bool)
-    ground_mask[list(ground_idx)] = True
-
-    n_ground  = ground_mask.sum()
-    n_removed = (~ground_mask).sum()
-    print(f"  CSF: {n_ground:,} ground points kept | "
-          f"{n_removed:,} non-ground removed "
-          f"({100*n_removed/len(xyz):.1f}%)")
-    return ground_mask
+    gi, ngi = CSF.VecInt(), CSF.VecInt()
+    csf.do_filtering(gi, ngi, exportCloth=False)
+    mask = np.zeros(len(xyz), dtype=bool)
+    mask[list(gi)] = True
+    print(f"  CSF: {mask.sum():,} ground | {(~mask).sum():,} non-ground removed "
+          f"({100*(~mask).sum()/len(xyz):.1f}%)")
+    return mask
 
 
-# ── Connected Component Filter ────────────────────────────────────────────
+# ── Feature alignment ─────────────────────────────────────────────────────
+
+def align_features_by_name(features, feat_names, common_feat_names):
+    """
+    Select and reorder features to match training feature set by name.
+    Handles cities with different feature counts (e.g. Bologna 46 vs 41).
+    Falls back to index truncation with a warning if names don't match.
+    """
+    # Check if feat_names are available and match
+    available = set(feat_names)
+    common    = [f for f in common_feat_names if f in available]
+
+    if len(common) < len(common_feat_names) * 0.8:
+        # Too many missing — fall back to truncation with warning
+        n = len(common_feat_names)
+        print(f"  [WARNING] Feature name mismatch. "
+              f"Expected {len(common_feat_names)}, found {len(common)} common. "
+              f"Falling back to index truncation to {n}.")
+        if features.shape[1] >= n:
+            return features[:, :n]
+        else:
+            pad = np.zeros((features.shape[0], n - features.shape[1]))
+            return np.hstack([features, pad])
+
+    idx      = [feat_names.index(f) for f in common]
+    aligned  = features[:, idx]
+    if len(common) < len(common_feat_names):
+        missing = len(common_feat_names) - len(common)
+        pad     = np.zeros((features.shape[0], missing))
+        aligned = np.hstack([aligned, pad])
+        print(f"  Feature alignment: {len(feat_names)} -> {aligned.shape[1]} "
+              f"({missing} padded)")
+    return aligned
+
+
+# ── Model loading ─────────────────────────────────────────────────────────
+
+def load_model(model_path, scaler_path, feat_names_path, device):
+    """
+    Load binary MLP, scaler, and common feature names.
+    Returns model, scaler, common_feat_names.
+    """
+    scaler            = joblib.load(scaler_path)
+    common_feat_names = joblib.load(feat_names_path)
+    expected_features = scaler.n_features_in_
+    model             = SidewalkStreetMLP(input_dim=expected_features)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    print(f"  Model loaded: {expected_features} input features "
+          f"({len(common_feat_names)} per-point × 3 context)")
+    return model, scaler, common_feat_names
+
+
+# ── Core processing ───────────────────────────────────────────────────────
+
+def load_and_prepare(city, sample_size, common_feat_names):
+    """
+    Load city → align features → CSF on full cloud → sample from
+    ground-only → build segments → context features.
+
+    Returns:
+        xyz_s            — sampled ground points (for saving .laz)
+        labels_s         — ground truth labels (may be all-zero for unlabelled)
+        X_seg            — segment feature matrix (ready for model)
+        seg_xyz          — segment centroids
+        unique_voxels    — for point projection
+        inverse_idx      — for point projection
+        csf_ground_mask  — which of the sampled points survived CSF
+                           (non-ground points = other in final output)
+    """
+    # Load
+    xyz_raw, labels_raw, features_raw, feat_names = load_city(city)
+
+    # Align features by name to match training
+    features_raw = align_features_by_name(
+        features_raw, feat_names, common_feat_names)
+    feat_names_aligned = common_feat_names  # for sample_and_filter roughness lookup
+
+    # CSF on full cloud — non-ground becomes other=0 automatically
+    csf_mask = csf_ground_filter(xyz_raw)
+    xyz_raw      = xyz_raw[csf_mask]
+    labels_raw   = labels_raw[csf_mask]
+    features_raw = features_raw[csf_mask]
+
+    # Sample from ground-only points + roughness filter
+    xyz_s, labels_s, features_s = sample_and_filter(
+        xyz_raw, labels_raw, features_raw,
+        feat_names_aligned, sample_size, training=False)
+
+    # Build segments + context features
+    seg_xyz, seg_feats, seg_labels, unique_voxels, inverse_idx, seg_voxel_ids = build_segments(
+        xyz_s, labels_s, features_s)
+
+    # Sanity check — context features need enough neighbours
+    from utils import N_NEIGHBORS
+    if len(seg_xyz) <= N_NEIGHBORS:
+        raise ValueError(
+            f"Too few segments ({len(seg_xyz)}) for context features. "
+            f"Need > {N_NEIGHBORS}. Check CSF parameters or sample size.")
+
+    X_seg, _ = add_context_features(seg_xyz, seg_feats)
+    return xyz_s, labels_s, X_seg, seg_xyz, unique_voxels, inverse_idx, seg_voxel_ids
+
+
+# ── Point projection ──────────────────────────────────────────────────────
+
+def project_to_points(binary_preds, unique_voxels, inverse_idx,
+                      n_points, seg_voxel_ids):
+    """
+    Map binary segment predictions (0=street, 1=sidewalk) back to points.
+    Uses seg_voxel_ids to correctly map each segment to its voxel,
+    even after the purity filter has removed some segments.
+
+    Without seg_voxel_ids, sequential iteration would assign prediction[i]
+    to the i-th voxel, which is wrong when boundary segments were removed.
+
+    Output uses IFP codes: 0=other, 2=sidewalk, 11=street.
+    Points in voxels that were purity-filtered get label 0 (other).
+    """
+    point_preds = np.zeros(n_points, dtype=np.uint8)
+
+    for seg_idx, voxel_idx in enumerate(seg_voxel_ids):
+        mask = inverse_idx == voxel_idx
+        if mask.sum() < MIN_POINTS:
+            continue
+        pred              = binary_preds[seg_idx]
+        ifp_code          = 2 if pred == 1 else 11   # 1=sidewalk->IFP2, 0=street->IFP11
+        point_preds[mask] = ifp_code
+
+    return point_preds
+
+
+# ── Label detection ───────────────────────────────────────────────────────
+
+def has_ground_truth_labels(city):
+    """Dynamically check if city has both sidewalk + street labels > 1%."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path     = os.path.join(base_dir, "preprocessed", city, "low_featured.laz")
+    las      = laspy.read(path)
+    labels   = np.array(las.classification, dtype=np.int32)
+    sw_frac  = (labels == 2).sum()  / len(labels)
+    st_frac  = (labels == 11).sum() / len(labels)
+    print(f"  Label check: sidewalk={100*sw_frac:.2f}% street={100*st_frac:.2f}%",
+          end="")
+    has = sw_frac >= LABEL_THRESHOLD and st_frac >= LABEL_THRESHOLD
+    print(f" -> {'Has ground truth' if has else 'Unlabelled'}")
+    return has
+
+
+# ── Pseudo-label fine-tuning (Path B) ────────────────────────────────────
+
+def run_pseudo_label_finetune(model, scaler, X_seg, device,
+                               confidence_threshold=0.95,
+                               epochs=20, batch_size=256, lr=0.0001):
+    """
+    Fine-tune binary model on high-confidence pseudo-labels from unlabelled city.
+
+    Steps:
+      1. Predict probabilities on all segments
+      2. Keep segments with max_prob >= confidence_threshold
+      3. Fine-tune model on those pseudo-labels
+      4. Re-predict everything with updated model
+    """
+    # Step 1 — probabilities
+    print(f"\n  Getting initial predictions...")
+    all_probs   = predict_proba_binary(model, scaler, X_seg, device)
+    predictions = all_probs.argmax(axis=1)
+    max_probs   = all_probs.max(axis=1)
+
+    # Step 2 — select confident pseudo-labels
+    confident_mask = max_probs >= confidence_threshold
+    n_confident    = confident_mask.sum()
+    n_total        = len(predictions)
+    print(f"  Pseudo-label selection: {n_confident:,}/{n_total:,} "
+          f"confident (≥{confidence_threshold*100:.0f}%)")
+
+    if n_confident < 100:
+        print(f"  [WARNING] Too few confident predictions. "
+              f"Try lowering --confidence. Skipping fine-tuning.")
+        return model, predictions
+
+    pseudo_labels = predictions[confident_mask]
+    X_pseudo      = X_seg[confident_mask]
+
+    names = {0: "street", 1: "sidewalk"}
+    unique, counts = np.unique(pseudo_labels, return_counts=True)
+    for cls, count in zip(unique, counts):
+        print(f"    {names[cls]:10s}: {count:,} ({100*count/n_confident:.1f}%)")
+
+    if len(unique) < 2:
+        print(f"  [WARNING] Only one class in pseudo-labels — skipping fine-tuning.")
+        return model, predictions
+
+    # Step 3 — fine-tune
+    print(f"\n  Fine-tuning on {n_confident:,} pseudo-labelled segments "
+          f"({epochs} epochs)...")
+    X_sc = scaler.transform(X_pseudo).astype(np.float32)
+
+    classes, c_counts = np.unique(pseudo_labels, return_counts=True)
+    weights    = 1.0 / c_counts
+    weights    = weights / weights.sum() * len(classes)
+    weight_vec = np.ones(2, dtype=np.float32)
+    for c, w in zip(classes, weights):
+        weight_vec[c] = w
+    class_weights = torch.FloatTensor(weight_vec).to(device)
+
+    X_t      = torch.FloatTensor(X_sc).to(device)
+    y_t      = torch.LongTensor(pseudo_labels).to(device)
+    loader   = DataLoader(TensorDataset(X_t, y_t),
+                          batch_size=batch_size, shuffle=True)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+        for X_b, y_b in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(X_b), y_b)
+            loss.backward()
+            total_loss += loss.item()
+        if (epoch + 1) % 5 == 0:
+            print(f"    Epoch {epoch+1:3d}/{epochs} | "
+                  f"Loss: {total_loss/len(loader):.4f}")
+    print(f"  Fine-tuning complete.")
+
+    # Step 4 — re-predict
+    model.eval()
+    new_preds = predict_mlp_binary(model, scaler, X_seg, device)
+    orig = dict(zip(*np.unique(predictions,  return_counts=True)))
+    new  = dict(zip(*np.unique(new_preds,    return_counts=True)))
+    print(f"\n  Before vs after fine-tuning:")
+    print(f"  {'Class':10} {'Before':>10} {'After':>10}")
+    for cls in [0, 1]:
+        print(f"  {names[cls]:10} "
+              f"{orig.get(cls, 0):>10,} {new.get(cls, 0):>10,}")
+    return model, new_preds
+
+
+# ── Connected component filter ────────────────────────────────────────────
 
 def remove_isolated_patches(xyz_s, point_preds, min_points=MIN_COMPONENT_PTS):
     """
     Remove isolated sidewalk patches too small to be real sidewalks.
-
-    Real sidewalks are large continuous surfaces.
-    Small isolated sidewalk patches are noise — reclassify as other.
-
-    Returns:
-        cleaned_preds : point predictions with noise removed
+    Reclassifies small isolated patches as other (IFP 0).
     """
-    from utils import VOXEL_SIZE as VS
-
     cleaned       = point_preds.copy()
     sidewalk_mask = point_preds == 2   # IFP code 2 = sidewalk
     n_before      = sidewalk_mask.sum()
@@ -99,29 +337,27 @@ def remove_isolated_patches(xyz_s, point_preds, min_points=MIN_COMPONENT_PTS):
         print("  No sidewalk points to filter.")
         return cleaned
 
-    sw_xyz  = xyz_s[sidewalk_mask]
-    sw_idx  = np.where(sidewalk_mask)[0]
-    radius  = VS * 3   # connect points within 3 voxel widths
-
-    tree    = KDTree(sw_xyz[:, :2])
-    visited = np.zeros(len(sw_xyz), dtype=bool)
-
+    sw_xyz    = xyz_s[sidewalk_mask]
+    sw_idx    = np.where(sidewalk_mask)[0]
+    radius    = VOXEL_SIZE * 3
+    tree      = KDTree(sw_xyz[:, :2])
+    visited   = np.zeros(len(sw_xyz), dtype=bool)
     components = []
+
     for i in range(len(sw_xyz)):
         if visited[i]:
             continue
-        component  = [i]
-        queue      = [i]
+        comp  = [i]
+        queue = [i]
         visited[i] = True
         while queue:
-            curr      = queue.pop(0)
-            neighbors = tree.query_radius([sw_xyz[curr, :2]], r=radius)[0]
-            for nb in neighbors:
+            curr = queue.pop(0)
+            for nb in tree.query_radius([sw_xyz[curr, :2]], r=radius)[0]:
                 if not visited[nb]:
                     visited[nb] = True
-                    component.append(nb)
+                    comp.append(nb)
                     queue.append(nb)
-        components.append(component)
+        components.append(comp)
 
     removed = 0
     for comp in components:
@@ -137,127 +373,19 @@ def remove_isolated_patches(xyz_s, point_preds, min_points=MIN_COMPONENT_PTS):
     return cleaned
 
 
-# ── Label detection ───────────────────────────────────────────────────────
-
-def has_ground_truth_labels(city):
-    """
-    Check if a city has usable ground truth labels.
-    Only counts IFP sidewalk (code 2) and street (code 11) as real labels.
-    Other non-zero codes (vegetation, buildings etc.) are ignored.
-    Returns True if more than 1% of points have sidewalk or street labels.
-    """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    path     = os.path.join(base_dir, "preprocessed", city, "low_featured.laz")
-    las      = laspy.read(path)
-    labels   = np.array(las.classification, dtype=np.int32)
-    frac     = (np.isin(labels, [2, 11])).sum() / len(labels)
-    print(f"  Label check: {100*frac:.2f}% sidewalk/street labels", end="")
-    if city.lower() in LABELLED_CITIES and frac >= LABEL_THRESHOLD:
-        print(f" -> Has ground truth labels")
-        return True
-    else:
-        print(f" -> No ground truth labels (unlabelled city)")
-        return False
-
-
-# ── Core apply function ───────────────────────────────────────────────────
-
-def load_model(model_path, scaler_path, device):
-    """Load final MLP model and scaler from disk."""
-    scaler   = joblib.load(scaler_path)
-    expected = scaler.n_features_in_
-    model    = SidewalkMLP(input_dim=expected)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-    return model, scaler, expected
-
-
-def process_city_data(city, sample_size, expected, csf_mask=None):
-    """
-    Load, sample, segment and build features for a city.
-    If csf_mask is provided, only ground points (from CSF) are used.
-
-    Feature alignment happens BEFORE context features are added.
-    expected is the number of per-point features the model was trained on.
-    After context (mean + std of neighbours), final feature count = expected * 3.
-    """
-    xyz, labels, features, feat_names         = load_city(city)
-    xyz_s, labels_s, features_s               = sample_and_filter(
-                                                    xyz, labels, features,
-                                                    feat_names, sample_size)
-
-    # Apply CSF ground mask if provided
-    if csf_mask is not None:
-        n_before   = len(xyz_s)
-        xyz_s      = xyz_s[csf_mask]
-        labels_s   = labels_s[csf_mask]
-        features_s = features_s[csf_mask]
-        print(f"  CSF mask applied: {n_before:,} -> {len(xyz_s):,} points")
-
-    # ── Align per-point features BEFORE segmentation ──────────────────────
-    # expected * 3 = final segment feature count (own + ctx_mean + ctx_std)
-    # So per-point features should match expected // 3
-    n_point_feats = expected // 3
-    if features_s.shape[1] > n_point_feats:
-        print(f"  Feature alignment: {features_s.shape[1]} -> {n_point_feats} "
-              f"per-point features (trimmed)")
-        features_s = features_s[:, :n_point_feats]
-    elif features_s.shape[1] < n_point_feats:
-        pad        = np.zeros((features_s.shape[0],
-                               n_point_feats - features_s.shape[1]))
-        features_s = np.hstack([features_s, pad])
-        print(f"  Feature alignment: padded to {n_point_feats} per-point features")
-
-    seg_xyz, seg_feats, seg_labels, \
-        unique_voxels, inverse_idx             = build_segments(
-                                                    xyz_s, labels_s, features_s)
-    X_seg, _                                   = add_context_features(
-                                                    seg_xyz, seg_feats)
-
-    # Final check — should match exactly now
-    if X_seg.shape[1] != expected:
-        pad   = np.zeros((X_seg.shape[0], expected - X_seg.shape[1]))
-        X_seg = np.hstack([X_seg, pad])
-
-    return xyz_s, labels_s, X_seg, seg_xyz, unique_voxels, inverse_idx
-
-
-def project_to_points(predictions, unique_voxels, inverse_idx, n_points,
-                      seg_xyz=None, voxel_size=VOXEL_SIZE):
-    """
-    Map segment-level predictions back to individual points.
-    Handles purity-filtered segments by matching via spatial proximity.
-    """
-    point_preds = np.zeros(n_points, dtype=np.uint8)
-    seg_counter = 0
-    n_segs      = len(predictions)
-
-    for i in range(len(unique_voxels)):
-        mask = inverse_idx == i
-        if mask.sum() < MIN_POINTS:
-            continue
-        if seg_counter >= n_segs:
-            break
-        pred              = predictions[seg_counter]
-        ifp_code          = 2 if pred == 1 else (11 if pred == 2 else 0)
-        point_preds[mask] = ifp_code
-        seg_counter      += 1
-    return point_preds
-
+# ── Output helpers ────────────────────────────────────────────────────────
 
 def print_distribution(point_preds, title="Label distribution"):
-    """Print class distribution of point predictions."""
     names_map        = {0: "other", 2: "sidewalk", 11: "street"}
     unique_c, cnts_c = np.unique(point_preds, return_counts=True)
+    total            = len(point_preds)
     print(f"\n{title}:")
     for cls, count in zip(unique_c, cnts_c):
-        print(f"  {cls:2d} ({names_map.get(int(cls), 'other'):10s}): "
-              f"{count:,} ({100*count/len(point_preds):.1f}%)")
+        print(f"  {cls:2d} ({names_map.get(int(cls),'other'):10s}): "
+              f"{count:,} ({100*count/total:.1f}%)")
 
 
 def save_laz(city, xyz_s, point_preds):
-    """Save classified point cloud to classified/{city}_mlp_classified.laz."""
     os.makedirs("classified", exist_ok=True)
     out_path               = f"classified/{city}_mlp_classified.laz"
     header                 = laspy.LasHeader(point_format=0, version="1.2")
@@ -267,128 +395,8 @@ def save_laz(city, xyz_s, point_preds):
     las_out.z              = xyz_s[:, 2]
     las_out.classification = point_preds
     las_out.write(out_path)
-    print(f"\n[OK] Saved {out_path}")
-    print(f"   Labels: 0=other, 2=sidewalk, 11=street")
-
-
-# ── Pseudo-label fine-tuning ──────────────────────────────────────────────
-
-def run_pseudo_label_finetune(model, scaler, X_seg, device,
-                               confidence_threshold, epochs,
-                               batch_size=256, lr=0.0001):
-    """
-    Fine-tune model on high-confidence pseudo-labels from unlabelled city.
-
-    Steps:
-        1. Get predictions + probabilities from current model
-        2. Keep only segments where confidence >= threshold
-        3. Fine-tune model on those pseudo-labels
-        4. Return updated model + new predictions for all segments
-    """
-
-    # ── Step 1: Get initial predictions with probabilities ────────────────
-    print(f"\n  Getting initial predictions...")
-    model.eval()
-    X_scaled = scaler.transform(X_seg).astype(np.float32)
-    X_tensor = torch.FloatTensor(X_scaled).to(device)
-
-    all_probs = []
-    with torch.no_grad():
-        for i in range(0, len(X_tensor), 512):
-            batch  = X_tensor[i:i+512]
-            logits = model(batch)
-            probs  = torch.softmax(logits, dim=1)
-            all_probs.append(probs.cpu().numpy())
-
-    all_probs   = np.vstack(all_probs)
-    predictions = all_probs.argmax(axis=1)
-    max_probs   = all_probs.max(axis=1)
-
-    # ── Step 2: Select high-confidence pseudo-labels ──────────────────────
-    confident_mask = max_probs >= confidence_threshold
-    n_confident    = confident_mask.sum()
-    n_total        = len(predictions)
-
-    print(f"\n  Pseudo-label selection:")
-    print(f"    Total segments:     {n_total:,}")
-    print(f"    Confident (≥{confidence_threshold*100:.0f}%): "
-          f"{n_confident:,} ({100*n_confident/n_total:.1f}%)")
-    print(f"    Discarded:          {n_total - n_confident:,} (too uncertain)")
-
-    if n_confident < 100:
-        print(f"\n  [WARNING]  Too few confident predictions ({n_confident}).")
-        print(f"     Try lowering --confidence. Skipping fine-tuning.")
-        return model, predictions
-
-    pseudo_labels = predictions[confident_mask]
-    X_pseudo      = X_seg[confident_mask]
-
-    unique, counts = np.unique(pseudo_labels, return_counts=True)
-    names          = {0: "other", 1: "sidewalk", 2: "street"}
-    print(f"\n  Pseudo-label class distribution:")
-    for cls, count in zip(unique, counts):
-        print(f"    {cls} ({names[cls]:10s}): {count:,} "
-              f"({100*count/n_confident:.1f}%)")
-
-    if len(unique) < 2:
-        print(f"\n  [WARNING]  Only one class in pseudo-labels — skipping fine-tuning.")
-        return model, predictions
-
-    # ── Step 3: Fine-tune on pseudo-labels ────────────────────────────────
-    print(f"\n  Fine-tuning on {n_confident:,} pseudo-labelled segments...")
-    print(f"  Epochs: {epochs} | LR: {lr}")
-
-    X_pseudo_scaled = scaler.transform(X_pseudo).astype(np.float32)
-
-    # Class weights
-    classes, c_counts = np.unique(pseudo_labels, return_counts=True)
-    weights    = 1.0 / c_counts
-    weights    = weights / weights.sum() * len(classes)
-    weight_vec = np.ones(3, dtype=np.float32)
-    for c, w in zip(classes, weights):
-        weight_vec[c] = w
-    class_weights = torch.FloatTensor(weight_vec).to(device)
-
-    X_t      = torch.FloatTensor(X_pseudo_scaled).to(device)
-    y_t      = torch.LongTensor(pseudo_labels).to(device)
-    dataset  = TensorDataset(X_t, y_t)
-    loader   = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        for X_batch, y_batch in loader:
-            optimizer.zero_grad()
-            out  = model(X_batch)
-            loss = criterion(out, y_batch)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        if (epoch + 1) % 5 == 0:
-            print(f"    Epoch {epoch+1:3d}/{epochs} | "
-                  f"Loss: {total_loss/len(loader):.4f}")
-
-    print(f"  Fine-tuning complete!")
-
-    # ── Step 4: Re-predict with fine-tuned model ──────────────────────────
-    print(f"\n  Re-predicting with fine-tuned model...")
-    new_predictions = predict_mlp(model, scaler, X_seg, device)
-
-    # Show before vs after comparison
-    orig_dict = dict(zip(*np.unique(predictions,     return_counts=True)))
-    new_dict  = dict(zip(*np.unique(new_predictions, return_counts=True)))
-    print(f"\n  Comparison before vs after fine-tuning:")
-    print(f"  {'Class':12} {'Before':>10} {'After':>10}")
-    print(f"  {'-'*35}")
-    for cls in [0, 1, 2]:
-        print(f"  {names[cls]:12} "
-              f"{orig_dict.get(cls, 0):>10,} "
-              f"{new_dict.get(cls, 0):>10,}")
-
-    return model, new_predictions
+    print(f"\n[OK] Saved: {out_path}")
+    print(f"     Labels: 0=other  2=sidewalk  11=street")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -396,125 +404,86 @@ def run_pseudo_label_finetune(model, scaler, X_seg, device,
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--city",             required=True)
-    parser.add_argument("--sample",           type=int,   default=SAMPLE_SIZE)
-    parser.add_argument("--confidence",       type=float, default=0.95,
-                        help="Confidence threshold for pseudo-labels (default 0.95)")
-    parser.add_argument("--finetune-epochs",  type=int,   default=20,
-                        help="Fine-tuning epochs for unlabelled cities (default 20)")
+    parser.add_argument("--city",            required=True)
+    parser.add_argument("--sample",          type=int,   default=SAMPLE_SIZE)
+    parser.add_argument("--confidence",      type=float, default=0.95)
+    parser.add_argument("--finetune-epochs", type=int,   default=20)
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
-    print(f"MLP Apply Model — {args.city.upper()}")
+    print(f"MLP Apply — {args.city.upper()}")
+    print(f"Pipeline: CSF → ground-only sample → binary MLP")
     print(f"{'='*60}")
 
-    # ── Check model exists ────────────────────────────────────────────────
-    model_path  = "models/final_mlp_classifier.pt"
-    scaler_path = "models/final_mlp_scaler.joblib"
+    # ── Check model files ─────────────────────────────────────────────────
+    model_path      = "models/final_mlp_classifier.pt"
+    scaler_path     = "models/final_mlp_scaler.joblib"
+    feat_names_path = "models/common_feat_names.joblib"
 
-    if not os.path.exists(model_path):
-        print("[ERROR] Final MLP model not found!")
-        print("   Run: python run_pipeline.py --train")
-        exit(1)
+    for path in [model_path, scaler_path, feat_names_path]:
+        if not os.path.exists(path):
+            print(f"[ERROR] Missing: {path}")
+            print("  Run: python dl_train_final_model.py")
+            exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"  Device: {device}")
 
-    # ── Detect whether city has ground truth labels ───────────────────────
+    # ── Load model ────────────────────────────────────────────────────────
+    model, scaler, common_feat_names = load_model(
+        model_path, scaler_path, feat_names_path, device)
+
+    # ── Detect labels ─────────────────────────────────────────────────────
     print(f"\nChecking labels for {args.city}...")
     labelled = has_ground_truth_labels(args.city)
 
-    # ── Load model ────────────────────────────────────────────────────────
-    model, scaler, expected = load_model(model_path, scaler_path, device)
+    # ── Load + prepare (same pipeline for both paths) ─────────────────────
+    print(f"\nLoading and preparing {args.city}...")
+    xyz_s, labels_s, X_seg, seg_xyz, unique_voxels, inverse_idx, seg_voxel_ids = \
+        load_and_prepare(args.city, args.sample, common_feat_names)
 
-    # ── Path A: Labelled city — apply directly ────────────────────────────
+    # ── Path A: labelled — predict + evaluate ─────────────────────────────
     if labelled:
-        print(f"\n[Path A] Labelled city — applying model directly...")
-        xyz_s, labels_s, X_seg, \
-            seg_xyz, unique_voxels, inverse_idx = process_city_data(
-                                                    args.city, args.sample, expected)
-        predictions = predict_mlp(model, scaler, X_seg, device)
-        point_preds = project_to_points(
-            predictions, unique_voxels, inverse_idx, len(xyz_s))
+        print(f"\n[Path A] Labelled city — predicting and evaluating...")
+        binary_preds = predict_mlp_binary(model, scaler, X_seg, device)
+        point_preds  = project_to_points(
+            binary_preds, unique_voxels, inverse_idx, len(xyz_s), seg_voxel_ids)
 
-    # ── Path B: Unlabelled city — CSF -> MLP -> fine-tune -> cleanup ────────
+        # Evaluate against ground truth (ground segments only)
+        from utils import remap_labels
+        from sklearn.metrics import classification_report, balanced_accuracy_score, f1_score
+        y_true_3class = remap_labels(labels_s)
+        # Only evaluate on sidewalk/street points (binary problem)
+        ground_mask  = np.isin(point_preds, [2, 11])
+        if ground_mask.sum() > 0:
+            # Map IFP codes back to binary for eval
+            pred_binary = (point_preds[ground_mask] == 2).astype(int)
+            # Ground truth binary (1=sidewalk, 0=street) for same points
+            true_binary = (y_true_3class[ground_mask] == MODEL_SIDEWALK).astype(int)
+            bal_acc = balanced_accuracy_score(true_binary, pred_binary)
+            sw_f1   = f1_score(true_binary, pred_binary, pos_label=1,
+                                zero_division=0)
+            print(f"\nEvaluation (ground segments only):")
+            print(f"  Balanced Acc: {bal_acc*100:.1f}% | Sidewalk F1: {sw_f1:.3f}")
+            print(classification_report(true_binary, pred_binary,
+                                        target_names=["street", "sidewalk"],
+                                        zero_division=0))
+
+    # ── Path B: unlabelled — fine-tune + cleanup ──────────────────────────
     else:
-        print(f"\n[Path B] Unlabelled city — 3-step pipeline:")
-        print(f"  Step 1: CSF geometry filter (blanket)")
-        print(f"  Step 2: MLP classification + pseudo-label fine-tuning")
-        print(f"  Step 3: Connected component noise removal")
+        print(f"\n[Path B] Unlabelled city — pseudo-label fine-tuning + cleanup")
 
-        # Load city ONCE — share same sampled data across all steps
-        from utils import load_city as _load_city, sample_and_filter as _saf, N_NEIGHBORS
-        from utils import build_segments as _bs, add_context_features as _acf
-        xyz_raw, labels_raw, features_raw, feat_names = _load_city(args.city)
-        xyz_sampled, labels_sampled, features_sampled = _saf(
-            xyz_raw, labels_raw, features_raw, feat_names, args.sample)
-
-        # Step 1 — CSF on the already-sampled points
-        print(f"\n── Step 1: CSF Geometry Filter ──")
-        for cloth_size in [0.5, 1.0, 2.0]:
-            csf_mask  = csf_ground_filter(xyz_sampled, cloth_size=cloth_size)
-            test_xyz  = xyz_sampled[csf_mask]
-            test_feats = features_sampled[csf_mask]
-            if test_feats.shape[1] > expected // 3:
-                test_feats = test_feats[:, :expected // 3]
-            _, test_segs, _, _, _ = _bs(test_xyz, labels_sampled[csf_mask], test_feats)
-            if len(test_segs) > N_NEIGHBORS:
-                break
-            print(f"  Too few segments with cloth_size={cloth_size}, retrying...")
-
-        # Apply CSF mask to sampled data
-        xyz_s      = xyz_sampled[csf_mask]
-        labels_s   = labels_sampled[csf_mask]
-        features_s = features_sampled[csf_mask]
-        print(f"  Ground points after CSF: {len(xyz_s):,}")
-
-        # Step 2 — Build segments and run MLP + fine-tune on CSF-filtered points
-        print(f"\n-- Step 2: MLP Classification + Fine-Tuning --")
-
-        # Align per-point features BEFORE segmentation
-        n_point_feats = expected // 3
-        if features_s.shape[1] > n_point_feats:
-            print(f"  Feature alignment: {features_s.shape[1]} -> {n_point_feats} "
-                  f"per-point features (trimmed)")
-            features_s = features_s[:, :n_point_feats]
-        elif features_s.shape[1] < n_point_feats:
-            pad        = np.zeros((features_s.shape[0],
-                                   n_point_feats - features_s.shape[1]))
-            features_s = np.hstack([features_s, pad])
-
-        seg_xyz, seg_feats, seg_labels, \
-            unique_voxels, inverse_idx = _bs(xyz_s, labels_s, features_s)
-        if len(seg_xyz) <= N_NEIGHBORS:
-            print(f"  [WARNING] Too few segments ({len(seg_xyz)}) for context features — skipping CSF and retrying without geometry filter")
-            csf_mask   = np.ones(len(xyz_sampled), dtype=bool)
-            xyz_s      = xyz_sampled
-            labels_s   = labels_sampled
-            features_s = features_sampled
-            if features_s.shape[1] > n_point_feats:
-                features_s = features_s[:, :n_point_feats]
-            seg_xyz, seg_feats, seg_labels, \
-                unique_voxels, inverse_idx = _bs(xyz_s, labels_s, features_s)
-        X_seg, _                       = _acf(seg_xyz, seg_feats)
-
-        # Final check
-        if X_seg.shape[1] != expected:
-            pad   = np.zeros((X_seg.shape[0], expected - X_seg.shape[1]))
-            X_seg = np.hstack([X_seg, pad])
-
-        model, predictions = run_pseudo_label_finetune(
+        model, binary_preds = run_pseudo_label_finetune(
             model, scaler, X_seg, device,
             confidence_threshold=args.confidence,
-            epochs=args.finetune_epochs
-        )
-        point_preds = project_to_points(
-            predictions, unique_voxels, inverse_idx, len(xyz_s))
+            epochs=args.finetune_epochs)
 
-        # Step 3 — Remove isolated noise patches
-        print(f"\n── Step 3: Connected Component Filter ──")
+        point_preds = project_to_points(
+            binary_preds, unique_voxels, inverse_idx, len(xyz_s), seg_voxel_ids)
+
+        print(f"\n── Connected Component Filter ──")
         point_preds = remove_isolated_patches(xyz_s, point_preds)
 
-    # ── Print distribution and save ───────────────────────────────────────
+    # ── Save ──────────────────────────────────────────────────────────────
     print_distribution(point_preds, title="Final label distribution")
     save_laz(args.city, xyz_s, point_preds)
