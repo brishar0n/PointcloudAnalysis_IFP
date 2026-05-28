@@ -325,14 +325,20 @@ def save_segmented_points_as_laz(
             on="segment_id",
             how="left"
         )
-        print(segmented_sidewalk['segment_id'].value_counts())
-        print(segment_metrics['segment_id'].value_counts())
         sidewalk_with_metrics.fillna({
         "segment_id": -1,
         "overall_width_m": -1.0,
         "usable_width_m": -1.0,
         "slope_percent": -1.0
         }, inplace=True)
+    
+        #TEMPORARILY COMMENTED OUT
+        temp_df=final_points[final_points["classification"] != SIDEWALK_LABEL]
+        temp_df["segment_id"] = -2
+        temp_df["overall_width_m"] = -1.0
+        temp_df["usable_width_m"] = -1.0
+        temp_df["slope_percent"] = -1.0
+        final_points=pd.concat([temp_df,sidewalk_with_metrics])
 
     # Create a new LAZ file from the original's header to preserve offsets/scales
     source_las = laspy.read(original_las_path)
@@ -349,7 +355,7 @@ def save_segmented_points_as_laz(
     las_out = laspy.LasData(header)
     # final_points=final_points.loc[final_points["classification"] == SIDEWALK_LABEL]
     # final_points=final_sidewalk_with_metrics
-    final_points=sidewalk_with_metrics
+    # final_points=sidewalk_with_metrics
     
     las_out.x, las_out.y, las_out.z = final_points["x"], final_points["y"], final_points["z"]
     las_out.classification = final_points["classification"]
