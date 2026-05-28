@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 """
 width_metrics.py
 
@@ -153,12 +153,12 @@ def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> 
     sidewalk = get_sidewalk_points(projected_points)
     obstacles = get_obstacle_points(projected_points)
 
-    sidewalk = segment_sidewalk(sidewalk, segment_size)
+    segmented_sidewalk = segment_sidewalk(sidewalk, segment_size)
 
     rows = []
     skipped_unrealistic_segments = 0
 
-    for segment_id, group in sidewalk.groupby("segment_id"):
+    for segment_id, group in segmented_sidewalk.groupby("segment_id"):
         if len(group) < 20:
             continue
 
@@ -183,7 +183,8 @@ def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> 
     if not rows:
         raise ValueError("No valid sidewalk segments found after filtering.")
 
-    return pd.DataFrame(rows), skipped_unrealistic_segments
+    metrics_df = pd.DataFrame(rows)
+    return metrics_df, skipped_unrealistic_segments, segmented_sidewalk
 
 
 def summarise_segment_metrics(metrics: pd.DataFrame, skipped_unrealistic_segments: int) -> dict:
@@ -304,7 +305,61 @@ def save_point_metric_outputs(
         json.dump(summary, file, indent=4)
 
     print(f"Saved segment metrics: {metrics_path}")
-    print(f"Saved summary metrics: {summary_path}")
+    print(f"Saved summary metrics: {summary_path}")    
+
+def save_segmented_points_as_laz(
+    output_path: Path,
+    original_las_path: Path,
+    all_points: pd.DataFrame,
+    segmented_sidewalk: pd.DataFrame,
+    segment_metrics: pd.DataFrame,
+) -> None:
+    """Saves all points with new segment/width attributes on sidewalk points."""
+    final_points = all_points.copy()
+
+    if not segmented_sidewalk.empty and not segment_metrics.empty:
+        # This DataFrame will have the metrics for each sidewalk point
+        sidewalk_with_metrics = pd.merge(
+            segmented_sidewalk,
+            segment_metrics[["segment_id", "overall_width_m", "usable_width_m", "slope_percent"]],
+            on="segment_id",
+            how="left"
+        )
+        print(segmented_sidewalk['segment_id'].value_counts())
+        print(segment_metrics['segment_id'].value_counts())
+        sidewalk_with_metrics.fillna({
+        "segment_id": -1,
+        "overall_width_m": -1.0,
+        "usable_width_m": -1.0,
+        "slope_percent": -1.0
+        }, inplace=True)
+
+    # Create a new LAZ file from the original's header to preserve offsets/scales
+    source_las = laspy.read(original_las_path)
+    header = laspy.LasHeader(version=source_las.header.version, point_format=source_las.header.point_format.id)
+    header.offsets = source_las.header.offsets
+    header.scales = source_las.header.scales
+
+    # Add the extra dimensions for our new features
+    header.add_extra_dim(laspy.ExtraBytesParams(name="segment_id", type=np.int32))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="segment_overall_width", type=np.float32))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="segment_usable_width", type=np.float32))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="segment_slope_percent", type=np.float32))
+
+    las_out = laspy.LasData(header)
+    # final_points=final_points.loc[final_points["classification"] == SIDEWALK_LABEL]
+    # final_points=final_sidewalk_with_metrics
+    final_points=sidewalk_with_metrics
+    
+    las_out.x, las_out.y, las_out.z = final_points["x"], final_points["y"], final_points["z"]
+    las_out.classification = final_points["classification"]
+    las_out.segment_id = final_points["segment_id"].astype(np.int32)
+    las_out.segment_overall_width = final_points["overall_width_m"].astype(np.float32)
+    las_out.segment_usable_width = final_points["usable_width_m"].astype(np.float32)
+    las_out.segment_slope_percent = final_points["slope_percent"].astype(np.float32)
+
+    las_out.write(output_path)
+    print(f"Saved all points with sidewalk width data: {output_path}")
 
 
 def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
@@ -320,7 +375,7 @@ def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
 
 def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -> None:
     points = load_laz_points(input_path)
-    metrics, skipped_unrealistic_segments = compute_segment_metrics(points, segment_size)
+    metrics, skipped_unrealistic_segments, segmented_sidewalk = compute_segment_metrics(points, segment_size)
 
     summary = summarise_segment_metrics(metrics, skipped_unrealistic_segments)
     summary["input_file"] = str(input_path)
@@ -330,6 +385,16 @@ def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -
     )
 
     save_point_metric_outputs(metrics, summary, output_dir)
+    
+    # save outputs to a laz file
+    laz_output_path = output_dir / "sidewalk_segmented_points.laz"
+    save_segmented_points_as_laz(
+        output_path=laz_output_path,
+        original_las_path=input_path,
+        all_points=points,
+        segmented_sidewalk=segmented_sidewalk,
+        segment_metrics=metrics,
+    )
 
 
 def run_boundary_metrics(kerb_file: Path, hfe_file: Path, output_dir: Path) -> None:
@@ -353,7 +418,7 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--input",
+        "--input-metric",
         help="Classified LAZ/LAS file for point-based metrics.",
     )
     parser.add_argument(
@@ -367,7 +432,7 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default="outputs/width_metrics",
+        default="outputs/",
         help="Output directory.",
     )
     parser.add_argument(
@@ -376,16 +441,22 @@ def main() -> None:
         default=1.0,
         help="Segment size in metres for point-based metrics.",
     )
+    parser.add_argument(
+        "--metric-city",
+        default='bologna',
+        help="city_name of the input file.",
+    )
 
     args = parser.parse_args()
     output_dir = Path(args.output)
+    output_dir=Path(os.path.join(output_dir,args.metric_city))
 
-    has_point_input = args.input is not None
+    has_point_input = args.input_metric is not None
     has_boundary_input = args.kerb_file is not None and args.hfe_file is not None
 
     if has_point_input:
         run_point_metrics(
-            input_path=Path(args.input),
+            input_path=Path(args.input_metric),
             output_dir=output_dir,
             segment_size=args.segment_size,
         )
@@ -399,7 +470,7 @@ def main() -> None:
 
     if not has_point_input and not has_boundary_input:
         raise ValueError(
-            "Please provide either --input for point-based metrics, "
+            "Please provide either --input-metric for point-based metrics, "
             "or both --kerb-file and --hfe-file for boundary-based metrics."
         )
 
