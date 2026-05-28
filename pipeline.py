@@ -1,11 +1,11 @@
 import argparse
-import run_preprocessing
+from preprocessing import run_preprocessing
 import subprocess
 import sys
 import os 
 
 def preprocessing(args):
-    target_output = f"classification/preprocessed/{args.city}"
+    target_output = f"classification/preprocessed/{args.city}_temp"
     
     print(f"STARTING PIPELINE for {args.city}")
     
@@ -37,7 +37,7 @@ def classification(args):
         class_cmd.append("--all")
         if args.cities is not None:
             class_cmd.append("--cities")
-            class_cmd.extend(args.cities)
+            class_cmd.extend([args.city])
     if args.loco:
         class_cmd.append("--loco")
     if args.train:
@@ -52,8 +52,6 @@ def classification(args):
     
     subprocess.run(class_cmd, cwd="classification", check=True)
     
-    # TODO MAKE SURE THAT USER IS ABLE TO APPLY THEIR OWN MODEL
-    
 def boundary_extraction(args):
     
     print("\n--- STEP 3: Boundary Extraction---")
@@ -64,7 +62,10 @@ def boundary_extraction(args):
     
     class_cmd = [sys.executable, "extract_sidewalk_boundary.py"]
     # if args.input_processing: 
-    class_cmd.extend(["--input-processing",str(abs_input_path)])
+    if args.input_processing is None:
+        class_cmd.extend(["--input-processing",str(abs_input_path)])
+    else:
+        class_cmd.extend(["--input-processing",str(args.input_processing)])
     if args.voxel_size: 
         class_cmd.extend(["--voxel-size",str(args.voxel_size)])
     if args.alpha:
@@ -83,6 +84,7 @@ def boundary_extraction(args):
         class_cmd.extend(["--street-label",str(args.street_label)])
     if args.interactive:
         class_cmd.extend(["--interactive",str(args.interactive)])
+    class_cmd.extend(["--boundary-city",str(args.city)])
     
     subprocess.run(class_cmd, cwd="./processing", check=True)
     
@@ -91,6 +93,7 @@ def width_calc(args):
     print("\n--- STEP 4: Width Metrics Calculation  ---")
     
     input_path=f"./classification/classified/{args.city}_mlp_classified.laz"
+    # input_path=f"./classification/preprocessed/bologna/low_featured.laz"
     # input_path = args.input_processing
     abs_input_path = os.path.abspath(input_path)
     print(f'Getting file: {abs_input_path}')
@@ -104,9 +107,25 @@ def width_calc(args):
         class_cmd.extend(["--hfe-obj",str(args.hfe_obj)])
     if args.segment_size:
         class_cmd.extend(["--segment-size",str(args.segment_size)])
+    class_cmd.extend(["--metric-city",str(args.city)])
     
     subprocess.run(class_cmd, cwd="./metrics", check=True)
     
+def visualise(args):
+    
+    print("\n--- STEP 5: Visualisation ---")
+    input_file = os.path.abspath(f'./classification/classified/{args.city}_mlp_classified.laz')
+    output_dir = os.path.abspath(f'./visualisation/potree_vis/pointclouds/{args.city}/city.laz')
+    
+    converter_path = os.path.join(
+        "visualisation", 
+        "PotreeConverter_1.7_windows_x64", 
+        "PotreeConverter.exe"
+    )
+
+    cmd = [converter_path, input_file, "-o", output_dir]
+    subprocess.run(cmd)
+
 def main():
     STREET_LABEL   = 11
     
@@ -204,9 +223,10 @@ def main():
     
     
     # preprocessing(args)
-    # classification(args)
+    classification(args)
     boundary_extraction(args)
     width_calc(args)
+    visualise(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
