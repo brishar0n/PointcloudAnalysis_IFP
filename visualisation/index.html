@@ -59,7 +59,8 @@
 			viewer.toggleSidebar();
 		});
 		
-		Potree.loadPointCloud("pointclouds/new_testing/cloud.js", "Bologna").then(function(e){
+		// Potree.loadPointCloud("pointclouds/utrecht/city.laz/cloud.js", "Bologna").then(function(e){
+		Potree.loadPointCloud("pointclouds/bologna_fullfeatured/cloud.js", "Bologna").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
 			e.pointcloud.position.z = 0;
 			let material = e.pointcloud.material;
@@ -73,7 +74,7 @@
 
 		Potree.loadPointCloud("pointclouds/new_testing_4/cloud.js", "Bologna_sidewalk").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
-			e.pointcloud.position.z = 5;
+			e.pointcloud.position.z = 0.5;
 			let material = e.pointcloud.material;
 			material.size = 3;
 			material.pointSizeType = Potree.PointSizeType.FIXED;
@@ -136,15 +137,13 @@
 				const mid = (min + max) / 2;
 
 				// 2. Build the gradient dynamically based on min/max
-				const gradient = [
-					[min,           new THREE.Color(0.1, 0.1, 0.1)], // Bottom: Dark
-					[min + 0.1,     new THREE.Color(0.0, 0.5, 1.0)], // Start: Blue
-					[mid * 0.75,    new THREE.Color(0.0, 1.0, 1.0)], // Mid-Low: Cyan
-					[mid,           new THREE.Color(1.0, 1.0, 0.0)], // Mid: Yellow
-					[max * 0.85,    new THREE.Color(1.0, 0.5, 0.0)], // Mid-High: Orange
-					[max,           new THREE.Color(1.0, 0.0, 1.0)]  // Top: Magenta
+				pc.material.gradient = [
+					[0.0,  new THREE.Color(0.25, 0.13, 0.0)],
+					[0.25, new THREE.Color(0.55, 0.27, 0.07)],
+					[0.5,  new THREE.Color(0.85, 0.53, 0.10)],
+					[0.75, new THREE.Color(0.95, 0.80, 0.0)],
+					[1.0,  new THREE.Color(1.0,  1.0,  0.0)]
 				];
-
 				// 3. Apply settings
 				pc.material.needsUpdate = true;
 				pc.material.activeAttributeName = "segment_usable_width";
