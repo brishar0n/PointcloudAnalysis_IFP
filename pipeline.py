@@ -96,7 +96,6 @@ def boundary_extraction(args):
     subprocess.run(class_cmd, cwd="./processing", check=True)
     
 def width_calc(args):
-    # SEE THE OUTPUT FOLDER CONFIG - IF YOU WANT TO REMOVE IT OR NOT
     print("\n--- STEP 4: Width Metrics Calculation  ---")
     
     if args.input_metric:
@@ -144,9 +143,6 @@ def main():
     parser = argparse.ArgumentParser(description="Main Pipeline")
     parser.add_argument("input", 
                         help="Path to input .LAZ or .LAS file")
-    # parser.add_argument("--output", "-o", 
-    #                     default="preprocessed/", 
-    #                     help="Output directory")
     parser.add_argument("--subsample", 
                         type=float, 
                         default=None, 
@@ -218,12 +214,6 @@ def main():
         "--hfe-file",
         help="HFE boundary file from boundary extraction.",
     )
-    # parser.add_argument(
-    #     "-o",
-    #     "--output",
-    #     default="outputs/width_metrics",
-    #     help="Output directory.",
-    # )
     parser.add_argument(
         "--segment-size",
         type=float,
