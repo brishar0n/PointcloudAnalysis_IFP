@@ -32,7 +32,8 @@
 		<div id="potree_render_area" style="background-image: url('../build/potree/resources/images/background.jpg');">
 
 			<span style="position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 10000">
-				<input type="button" value="Default Scheme" onclick="setDefaultScheme()"/>
+				<input type="button" value="Colour By Classification" onclick="setClassificationColour()"/>
+				<input type="button" value="Real Colours" onclick="setRealColours()"/>
 			</span>
 
 		</div>
@@ -47,7 +48,7 @@
 		
 
 		viewer.setDescription(`
-		Pointcloud Classification Viewer `);
+		Classification Testing `);
 		
 		viewer.setEDLEnabled(true);
 		viewer.setFOV(60);
@@ -58,9 +59,21 @@
 			viewer.toggleSidebar();
 		});
 		
-		Potree.loadPointCloud("pointclouds/bologna_fullfeatured/cloud.js", "Bologna", function(e){
+		Potree.loadPointCloud("pointclouds/new_testing/cloud.js", "Bologna").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
 			e.pointcloud.position.z = 0;
+			let material = e.pointcloud.material;
+			material.size = 3;
+			material.pointSizeType = Potree.PointSizeType.FIXED;
+			material.activeAttributeName = "classification";
+			
+			viewer.fitToScreen();
+			window.setDefaultScheme();
+		});
+
+		Potree.loadPointCloud("pointclouds/new_testing_4/cloud.js", "Bologna_sidewalk").then(function(e){
+			viewer.scene.addPointCloud(e.pointcloud);
+			e.pointcloud.position.z = 5;
 			let material = e.pointcloud.material;
 			material.size = 3;
 			material.pointSizeType = Potree.PointSizeType.FIXED;
@@ -100,6 +113,91 @@
 			}
 			viewer.setClassifications(scheme)
 		}
+
+		window.setClassificationColour = function(){
+			window.setDefaultScheme();
+			viewer.scene.pointclouds.forEach(pointcloud => {
+            pointcloud.material.activeAttributeName = "classification";
+        	});
+		}
+
+		window.setRealColours = function(){
+			viewer.scene.pointclouds.forEach(pc => {
+				// 1. Get the attribute range from the point cloud statistics
+				// Note: Potree stores range info in attribute statistics after loading
+				const attr = pc.getAttribute("segment_usable_width");
+				if (!attr) {
+					console.error("Attribute segment_usable_width not found!");
+					return;
+				}
+
+				const min = attr.range[0];
+				const max = attr.range[1];
+				const mid = (min + max) / 2;
+
+				// 2. Build the gradient dynamically based on min/max
+				const gradient = [
+					[min,           new THREE.Color(0.1, 0.1, 0.1)], // Bottom: Dark
+					[min + 0.1,     new THREE.Color(0.0, 0.5, 1.0)], // Start: Blue
+					[mid * 0.75,    new THREE.Color(0.0, 1.0, 1.0)], // Mid-Low: Cyan
+					[mid,           new THREE.Color(1.0, 1.0, 0.0)], // Mid: Yellow
+					[max * 0.85,    new THREE.Color(1.0, 0.5, 0.0)], // Mid-High: Orange
+					[max,           new THREE.Color(1.0, 0.0, 1.0)]  // Top: Magenta
+				];
+
+				// 3. Apply settings
+				pc.material.needsUpdate = true;
+				pc.material.activeAttributeName = "segment_usable_width";
+				pc.material.gradient = gradient;
+				pc.material.pointColorType = Potree.PointColorType.ATTR; 
+				pc.material.pointSizeType = Potree.PointSizeType.FIXED;
+				pc.material.size = 1.5;
+			});
+		}
+
+		// window.setRealColours = function(){
+		// 	viewer.scene.pointclouds.forEach(pc => {
+		// 		const attr = pc.getAttribute("segment_usable_width");
+		// 		if (!attr) return;
+
+		// 		const min = attr.range[0];
+		// 		const max = attr.range[1];
+				
+		// 		// Define your color palette for the bands
+		// 		const colors = [
+		// 			new THREE.Color(0.2, 0.2, 0.5), // Dark Blue (Background/Low)
+		// 			new THREE.Color(0.8, 0.2, 0.4), // Red/Magenta
+		// 			new THREE.Color(0.4, 0.8, 0.5), // Green
+		// 			new THREE.Color(0.9, 0.7, 0.2)  // Yellow
+		// 		];
+
+		// 		// Create the stepped gradient
+		// 		const steps = colors.length - 1;
+		// 		const gradient = [];
+				
+		// 		// Add a "buffer" for background
+		// 		gradient.push([min, colors[0]]);
+		// 		gradient.push([min + 0.01, colors[0]]);
+
+		// 		// Calculate even steps between min and max
+		// 		for (let i = 0; i < colors.length; i++) {
+		// 			const val = min + (i / steps) * (max - min);
+		// 			// Add two points per color to create the "step"
+		// 			gradient.push([val, colors[i]]);
+		// 			if (i < steps) {
+		// 				const nextVal = min + ((i + 1) / steps) * (max - min);
+		// 				gradient.push([nextVal - 0.01, colors[i]]);
+		// 			}
+		// 		}
+
+		// 		pc.material.needsUpdate = true;
+		// 		pc.material.activeAttributeName = "segment_usable_width";
+		// 		pc.material.gradient = gradient;
+		// 		pc.material.pointColorType = Potree.PointColorType.ATTR; 
+		// 		pc.material.pointSizeType = Potree.PointSizeType.FIXED;
+		// 		pc.material.size = 1.5;
+		// 	});
+		// }
 
 	</script>
 	
