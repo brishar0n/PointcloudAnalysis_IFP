@@ -153,51 +153,6 @@
 				pc.material.size = 1.5;
 			});
 		}
-
-		// window.setRealColours = function(){
-		// 	viewer.scene.pointclouds.forEach(pc => {
-		// 		const attr = pc.getAttribute("segment_usable_width");
-		// 		if (!attr) return;
-
-		// 		const min = attr.range[0];
-		// 		const max = attr.range[1];
-				
-		// 		// Define your color palette for the bands
-		// 		const colors = [
-		// 			new THREE.Color(0.2, 0.2, 0.5), // Dark Blue (Background/Low)
-		// 			new THREE.Color(0.8, 0.2, 0.4), // Red/Magenta
-		// 			new THREE.Color(0.4, 0.8, 0.5), // Green
-		// 			new THREE.Color(0.9, 0.7, 0.2)  // Yellow
-		// 		];
-
-		// 		// Create the stepped gradient
-		// 		const steps = colors.length - 1;
-		// 		const gradient = [];
-				
-		// 		// Add a "buffer" for background
-		// 		gradient.push([min, colors[0]]);
-		// 		gradient.push([min + 0.01, colors[0]]);
-
-		// 		// Calculate even steps between min and max
-		// 		for (let i = 0; i < colors.length; i++) {
-		// 			const val = min + (i / steps) * (max - min);
-		// 			// Add two points per color to create the "step"
-		// 			gradient.push([val, colors[i]]);
-		// 			if (i < steps) {
-		// 				const nextVal = min + ((i + 1) / steps) * (max - min);
-		// 				gradient.push([nextVal - 0.01, colors[i]]);
-		// 			}
-		// 		}
-
-		// 		pc.material.needsUpdate = true;
-		// 		pc.material.activeAttributeName = "segment_usable_width";
-		// 		pc.material.gradient = gradient;
-		// 		pc.material.pointColorType = Potree.PointColorType.ATTR; 
-		// 		pc.material.pointSizeType = Potree.PointSizeType.FIXED;
-		// 		pc.material.size = 1.5;
-		// 	});
-		// }
-
 	</script>
 	
 	
