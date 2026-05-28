@@ -792,11 +792,9 @@ def save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, o
 # --- Entry Point ---
 
 def main():
-    script_dir = Path(__file__).resolve().parent
-    out_dir    = script_dir.parent / "outputs"
 
     parser = argparse.ArgumentParser(description="Sidewalk Boundary Extraction")
-    parser.add_argument("input",               help="Path to classified LAZ file")
+    parser.add_argument("--input-processing",help="Path to classified LAZ file")
     parser.add_argument("--voxel-size",        type=float, default=0.25)
     parser.add_argument("--alpha",             type=float, default=0.3)
     parser.add_argument("--slice-step",        type=float, default=0.5)
@@ -806,9 +804,11 @@ def main():
     parser.add_argument("--merge-dist",        type=float, default=8.0)
     parser.add_argument("--street-label",      type=int,   default=STREET_LABEL)
     parser.add_argument("--interactive",       action="store_true")
+    parser.add_argument("--boundary-city", default=None)
     args = parser.parse_args()
 
     params = {
+        "input_processing": args.input_processing,
         "voxel_size":      args.voxel_size,
         "alpha":           args.alpha,
         "slice_step":      args.slice_step,
@@ -820,11 +820,13 @@ def main():
     }
 
     print("=== Sidewalk Boundary Extraction Tool ===")
+    
+    out_dir = Path(f"outputs/{args.boundary_city}")
 
     if args.interactive:
-        interactive_loop(args.input, out_dir, params)
+        interactive_loop(args.input_processing, out_dir, params)
     else:
-        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(args.input, params)
+        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(args.input_processing, params)
         save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, out_dir, source_las)
         print("Done")
 
