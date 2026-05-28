@@ -37,6 +37,9 @@ def classification(args):
         class_cmd.append("--all")
         if args.cities is not None:
             class_cmd.append("--cities")
+            class_cmd.extend(args.cities)
+        else:
+            class_cmd.append("--cities")
             class_cmd.extend([args.city])
     if args.loco:
         class_cmd.append("--loco")
@@ -47,9 +50,13 @@ def classification(args):
         if args.cities is not None:
             class_cmd.append("--cities")
             class_cmd.extend(args.cities)
+        else:
+            class_cmd.append("--cities")
+            class_cmd.extend([args.city])
     if args.epochs:
         class_cmd.extend(["--epochs",str(args.epochs)])
     
+    print(class_cmd)
     subprocess.run(class_cmd, cwd="classification", check=True)
     
 def boundary_extraction(args):
@@ -120,7 +127,7 @@ def visualise(args):
     
     print("\n--- STEP 5: Visualisation ---")
     input_file = os.path.abspath(f'./classification/classified/{args.city}_mlp_classified.laz')
-    output_dir = os.path.abspath(f'./visualisation/potree_vis/pointclouds/{args.city}/city.laz')
+    output_dir = os.path.abspath(f'./visualisation/potree_vis/pointclouds/{args.city}/city')
     
     converter_path = os.path.join(
         "visualisation", 
@@ -175,7 +182,7 @@ def main():
     parser.add_argument(
         "--cities",
         nargs="+",
-        default=["utrecht", "bologna"],
+        # default=["utrecht", "bologna"],
         metavar="CITY",
         help="Cities to apply the model to (default: utrecht bologna)"
     )
@@ -228,10 +235,10 @@ def main():
     
     
     # preprocessing(args)
-    # classification(args)
+    classification(args)
     boundary_extraction(args)
     width_calc(args)
-    # visualise(args)
+    visualise(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
