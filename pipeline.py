@@ -56,9 +56,9 @@ def boundary_extraction(args):
     
     print("\n--- STEP 3: Boundary Extraction---")
     
-    input_path=f"./classification/classified/{args.city}_mlp_classified.laz"
-    # input_path = args.input_processing
-    abs_input_path = os.path.abspath(input_path)
+    # Use the provided input or default to the output of the classification step
+    input_file = args.input_processing or f"./classification/classified/{args.city}_mlp_classified.laz"
+    abs_input_path = os.path.abspath(input_file)
     
     class_cmd = [sys.executable, "extract_sidewalk_boundary.py"]
     # if args.input_processing: 
@@ -92,19 +92,24 @@ def width_calc(args):
     # SEE THE OUTPUT FOLDER CONFIG - IF YOU WANT TO REMOVE IT OR NOT
     print("\n--- STEP 4: Width Metrics Calculation  ---")
     
-    input_path=f"./classification/classified/{args.city}_mlp_classified.laz"
-    # input_path=f"./classification/preprocessed/bologna/low_featured.laz"
-    # input_path = args.input_processing
+    if args.input_metric:
+        input_path = args.input_metric
+    else:
+        input_path = f"./classification/classified/{args.city}_mlp_classified.laz"
+
     abs_input_path = os.path.abspath(input_path)
     print(f'Getting file: {abs_input_path}')
     
     class_cmd = [sys.executable, "width_metrics.py"]
-    # if args.input_processing: 
-    class_cmd.extend(["--input-metric",str(abs_input_path)])
-    if args.kerb_obj: 
-        class_cmd.extend(["--kerb-obj",str(args.kerb_obj)])
-    if args.hfe_obj:
-        class_cmd.extend(["--hfe-obj",str(args.hfe_obj)])
+    class_cmd.extend(["--input-metric", str(abs_input_path)])
+    if args.kerb_file: 
+        class_cmd.extend(["--kerb-file",str(args.kerb_file)])
+    else:
+        input_path = f"./processing/outputs/{args.city}/sidewalk_KI.laz"
+    if args.hfe_file :
+        class_cmd.extend(["--hfe-file",str(args.hfe_file)])
+    else:
+        input_path = f"./processing/outputs/{args.city}/sidewalk_HFE.laz"
     if args.segment_size:
         class_cmd.extend(["--segment-size",str(args.segment_size)])
     class_cmd.extend(["--metric-city",str(args.city)])
@@ -199,12 +204,12 @@ def main():
         help="Classified LAZ/LAS file for point-based metrics.",
     )
     parser.add_argument(
-        "--kerb-obj",
-        help="Kerb boundary OBJ file from boundary extraction.",
+        "--kerb-file",
+        help="Kerb boundary file from boundary extraction.",
     )
     parser.add_argument(
-        "--hfe-obj",
-        help="HFE boundary OBJ file from boundary extraction.",
+        "--hfe-file",
+        help="HFE boundary file from boundary extraction.",
     )
     # parser.add_argument(
     #     "-o",
@@ -223,10 +228,10 @@ def main():
     
     
     # preprocessing(args)
-    classification(args)
+    # classification(args)
     boundary_extraction(args)
     width_calc(args)
-    visualise(args)
+    # visualise(args)
     
     print("\n FULL PIPELINE COMPLETED SUCCESSFULLY!")
 
