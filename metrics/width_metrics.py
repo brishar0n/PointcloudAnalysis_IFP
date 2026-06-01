@@ -305,7 +305,8 @@ def save_point_metric_outputs(
         json.dump(summary, file, indent=4)
 
     print(f"Saved segment metrics: {metrics_path}")
-    print(f"Saved summary metrics: {summary_path}")    
+    print(f"Saved summary metrics: {summary_path}")
+    
 
 def save_segmented_points_as_laz(
     output_path: Path,
@@ -365,6 +366,19 @@ def save_segmented_points_as_laz(
     las_out.segment_slope_percent = final_points["slope_percent"].astype(np.float32)
 
     las_out.write(output_path)
+    
+    #saving sidewalk points as separate laz
+    las_out2=laspy.LasData(header)
+    las_out2.x, las_out2.y, las_out2.z = sidewalk_with_metrics["x"], sidewalk_with_metrics["y"], sidewalk_with_metrics["z"]
+    las_out2.classification = sidewalk_with_metrics["classification"]
+    las_out2.segment_id = sidewalk_with_metrics["segment_id"].astype(np.int32)
+    las_out2.segment_overall_width = sidewalk_with_metrics["overall_width_m"].astype(np.float32)
+    las_out2.segment_usable_width = sidewalk_with_metrics["usable_width_m"].astype(np.float32)
+    las_out2.segment_slope_percent = sidewalk_with_metrics["slope_percent"].astype(np.float32)
+    
+    las_out2_path=output_path.parent / "sidewalk_segmented_points.laz"
+    las_out2.write(las_out2_path)
+    
     print(f"Saved all points with sidewalk width data: {output_path}")
 
 
@@ -393,7 +407,7 @@ def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -
     save_point_metric_outputs(metrics, summary, output_dir)
     
     # save outputs to a laz file
-    laz_output_path = output_dir / "sidewalk_segmented_points.laz"
+    laz_output_path = output_dir / "city_with_segments.laz"
     save_segmented_points_as_laz(
         output_path=laz_output_path,
         original_las_path=input_path,
