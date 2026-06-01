@@ -126,7 +126,7 @@ def width_calc(args):
 def visualise(args):
     
     print("\n--- STEP 5: Visualisation ---")
-    input_file = os.path.abspath(f'./classification/classified/{args.city}_mlp_classified.laz')
+    input_file = os.path.abspath(f'./metrics/outputs/{args.city}/city_with_segments.laz')
     output_dir = os.path.abspath(f'./visualisation/potree_vis/pointclouds/{args.city}/city')
     
     converter_path = os.path.join(
@@ -134,9 +134,15 @@ def visualise(args):
         "PotreeConverter_1.7_windows_x64", 
         "PotreeConverter.exe"
     )
+    
+    input_file2 = os.path.abspath(f'./metrics/outputs/{args.city}/sidewalk_segmented_points.laz')
+    output_dir2 = os.path.abspath(f'./visualisation/potree_vis/pointclouds/{args.city}/sidewalk')
 
-    cmd = [converter_path, input_file, "-o", output_dir]
+    cmd = [converter_path, input_file, "-o", output_dir,"--overwrite"]
+    cmd2 = [converter_path, input_file2, "-o", output_dir2,"--overwrite"]
+    
     subprocess.run(cmd)
+    subprocess.run(cmd2)
 
 def main():
     STREET_LABEL   = 11
@@ -224,7 +230,7 @@ def main():
     args = parser.parse_args()
     
     
-    # preprocessing(args)
+    preprocessing(args)
     classification(args)
     boundary_extraction(args)
     width_calc(args)
