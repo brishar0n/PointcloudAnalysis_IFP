@@ -3,3 +3,6 @@
 preprocessed/
 __pycache__/
 *.npz
+classification/models/
+classification/results/
+classification/classified/

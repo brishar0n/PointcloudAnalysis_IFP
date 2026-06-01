@@ -1,5 +1,0 @@
-held_out_city,train_cities,n_train,n_val,n_test,train_bal_acc,train_sw_f1,val_bal_acc,val_sw_f1,test_bal_acc,test_sw_f1
-bologna,riga+vilnius+warsaw,22083,7361,13388,99.9,0.999,99.3,0.99,54.3,0.226
-riga,bologna+vilnius+warsaw,26982,8993,6857,99.9,0.998,99.1,0.988,68.0,0.673
-vilnius,bologna+riga+warsaw,22097,7365,13370,99.9,0.998,99.1,0.988,65.7,0.613
-warsaw,bologna+riga+vilnius,25212,8403,9217,99.9,0.998,99.2,0.989,80.3,0.775
