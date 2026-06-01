@@ -512,11 +512,9 @@ def compute_centrelines(hfe_lines, ki_lines):
     centrelines = []
 
     for i, (hfe, ki) in enumerate(zip(hfe_lines, ki_lines)):
-        # take midpoints directly
         n = max(len(hfe), len(ki))
 
         def resample(line, n):
-            # spread n evenly spaced points along the line
             dists = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(line[:, :2], axis=0), axis=1))])
             total = dists[-1]
             if total < 1e-9:
@@ -530,7 +528,6 @@ def compute_centrelines(hfe_lines, ki_lines):
         hfe_r = resample(hfe, n)
         ki_r  = resample(ki,  n)
 
-        # midpoint between the two lines
         centre = (hfe_r + ki_r) / 2.0
         centrelines.append(centre)
         print(f"  Strip {i}: centreline with {n} points")
@@ -555,12 +552,10 @@ def stitch_lines(polys, close_gap=8.0, stitch_gap=6.0):
 
     result = [c.copy() for c in polys]
 
-    # first pass: close any rings where start and end are nearly touching
     for i, poly in enumerate(result):
         if 0 < np.linalg.norm(poly[0, :2] - poly[-1, :2]) < close_gap:
             result[i] = np.vstack([poly, poly[0]])
 
-    # second pass: stitch nearby open endpoints across different polylines
     for _ in range(20):
         merged = False
         used   = [False] * len(result)
@@ -610,7 +605,6 @@ def stitch_lines(polys, close_gap=8.0, stitch_gap=6.0):
         if not merged:
             break
 
-    # final pass: close any rings that are now within gap after stitching
     for i, c in enumerate(result):
         if 0 < np.linalg.norm(c[0, :2] - c[-1, :2]) < close_gap:
             result[i] = np.vstack([c, c[0]])
