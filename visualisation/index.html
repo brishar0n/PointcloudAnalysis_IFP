@@ -59,8 +59,8 @@
 			viewer.toggleSidebar();
 		});
 		
-		// Potree.loadPointCloud("pointclouds/utrecht/city.laz/cloud.js", "Bologna").then(function(e){
-		Potree.loadPointCloud("pointclouds/bologna_fullfeatured/cloud.js", "Bologna").then(function(e){
+		// Potree.loadPointCloud("pointclouds/riga/city/cloud.js", "Bologna").then(function(e){
+		Potree.loadPointCloud("pointclouds/riga/city/cloud.js", "City").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
 			e.pointcloud.position.z = 0;
 			let material = e.pointcloud.material;
@@ -72,7 +72,7 @@
 			window.setDefaultScheme();
 		});
 
-		Potree.loadPointCloud("pointclouds/new_testing_4/cloud.js", "Bologna_sidewalk").then(function(e){
+		Potree.loadPointCloud("pointclouds/riga/sidewalk/cloud.js", "Sidewalk").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
 			e.pointcloud.position.z = 0.5;
 			let material = e.pointcloud.material;
@@ -124,8 +124,6 @@
 
 		window.setRealColours = function(){
 			viewer.scene.pointclouds.forEach(pc => {
-				// 1. Get the attribute range from the point cloud statistics
-				// Note: Potree stores range info in attribute statistics after loading
 				const attr = pc.getAttribute("segment_usable_width");
 				if (!attr) {
 					console.error("Attribute segment_usable_width not found!");
@@ -136,18 +134,17 @@
 				const max = attr.range[1];
 				const mid = (min + max) / 2;
 
-				// 2. Build the gradient dynamically based on min/max
-				pc.material.gradient = [
-					[0.0,  new THREE.Color(0.25, 0.13, 0.0)],
-					[0.25, new THREE.Color(0.55, 0.27, 0.07)],
-					[0.5,  new THREE.Color(0.85, 0.53, 0.10)],
-					[0.75, new THREE.Color(0.95, 0.80, 0.0)],
-					[1.0,  new THREE.Color(1.0,  1.0,  0.0)]
-				];
-				// 3. Apply settings
+				// pc.material.gradient = [
+				// 	[0.0,  new THREE.Color(0.25, 0.13, 0.0)],
+				// 	[0.25, new THREE.Color(0.55, 0.27, 0.07)],
+				// 	[0.5,  new THREE.Color(0.85, 0.53, 0.10)],
+				// 	[0.75, new THREE.Color(0.95, 0.80, 0.0)],
+				// 	[1.0,  new THREE.Color(1.0,  1.0,  0.0)]
+				// ];
+				
 				pc.material.needsUpdate = true;
 				pc.material.activeAttributeName = "segment_usable_width";
-				pc.material.gradient = gradient;
+				// pc.material.gradient = gradient;
 				pc.material.pointColorType = Potree.PointColorType.ATTR; 
 				pc.material.pointSizeType = Potree.PointSizeType.FIXED;
 				pc.material.size = 1.5;
