@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os
+
 """
 width_metrics.py
 
@@ -23,6 +23,24 @@ OBSTACLE_LABELS = {0, 5, 8, 13, 15}
 MAX_REASONABLE_WIDTH_M = 15.0
 MIN_REASONABLE_BOUNDARY_WIDTH_M = 0.8
 MAX_REASONABLE_BOUNDARY_WIDTH_M = 15.0
+
+
+def infer_city_name(file_path: Path | None = None, output_path: Path | None = None) -> str:
+    if file_path is not None:
+        name = file_path.stem.lower()
+        for suffix in ["_mlp_classified", "_classified", "_subsampled"]:
+            name = name.replace(suffix, "")
+        if name:
+            return name
+
+    if output_path is not None:
+        name = output_path.name.lower()
+        if name.endswith("_width_metrics"):
+            return name.replace("_width_metrics", "")
+        if name:
+            return name
+
+    return "default"
 
 
 def load_laz_points(file_path: Path) -> pd.DataFrame:
@@ -138,7 +156,7 @@ def compute_usable_width(
     return float(usable_width), int(len(segment_obstacles))
 
 
-def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> tuple[pd.DataFrame, int]:
+def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> tuple[pd.DataFrame, int, pd.DataFrame]:
     sidewalk = get_sidewalk_points(points)
 
     origin, along_axis, across_axis = estimate_sidewalk_axes(sidewalk)
@@ -183,8 +201,7 @@ def compute_segment_metrics(points: pd.DataFrame, segment_size: float = 1.0) -> 
     if not rows:
         raise ValueError("No valid sidewalk segments found after filtering.")
 
-    metrics_df = pd.DataFrame(rows)
-    return metrics_df, skipped_unrealistic_segments, segmented_sidewalk
+    return pd.DataFrame(rows), skipped_unrealistic_segments, segmented_sidewalk
 
 
 def summarise_segment_metrics(metrics: pd.DataFrame, skipped_unrealistic_segments: int) -> dict:
@@ -224,9 +241,6 @@ def load_obj_vertices(obj_path: Path) -> np.ndarray:
 
 
 def load_boundary_points(boundary_path: Path) -> np.ndarray:
-    """
-    Load boundary points from OBJ, LAS, or LAZ files.
-    """
     suffix = boundary_path.suffix.lower()
 
     if suffix == ".obj":
@@ -306,7 +320,7 @@ def save_point_metric_outputs(
 
     print(f"Saved segment metrics: {metrics_path}")
     print(f"Saved summary metrics: {summary_path}")
-    
+
 
 def save_segmented_points_as_laz(
     output_path: Path,
@@ -315,50 +329,47 @@ def save_segmented_points_as_laz(
     segmented_sidewalk: pd.DataFrame,
     segment_metrics: pd.DataFrame,
 ) -> None:
-    """Saves all points with new segment/width attributes on sidewalk points."""
     final_points = all_points.copy()
 
-    if not segmented_sidewalk.empty and not segment_metrics.empty:
-        # This DataFrame will have the metrics for each sidewalk point
-        sidewalk_with_metrics = pd.merge(
-            segmented_sidewalk,
-            segment_metrics[["segment_id", "overall_width_m", "usable_width_m", "slope_percent"]],
-            on="segment_id",
-            how="left"
-        )
-        sidewalk_with_metrics.fillna({
+    sidewalk_with_metrics = pd.merge(
+        segmented_sidewalk,
+        segment_metrics[["segment_id", "overall_width_m", "usable_width_m", "slope_percent"]],
+        on="segment_id",
+        how="left",
+    )
+
+    sidewalk_with_metrics = sidewalk_with_metrics.fillna({
         "segment_id": -1,
         "overall_width_m": -1.0,
         "usable_width_m": -1.0,
-        "slope_percent": -1.0
-        }, inplace=True)
-    
-        #TEMPORARILY COMMENTED OUT
-        temp_df=final_points[final_points["classification"] != SIDEWALK_LABEL]
-        temp_df["segment_id"] = -2
-        temp_df["overall_width_m"] = -1.0
-        temp_df["usable_width_m"] = -1.0
-        temp_df["slope_percent"] = -1.0
-        final_points=pd.concat([temp_df,sidewalk_with_metrics])
+        "slope_percent": -1.0,
+    })
 
-    # Create a new LAZ file from the original's header to preserve offsets/scales
+    temp_df = final_points[final_points["classification"] != SIDEWALK_LABEL].copy()
+    temp_df["segment_id"] = -2
+    temp_df["overall_width_m"] = -1.0
+    temp_df["usable_width_m"] = -1.0
+    temp_df["slope_percent"] = -1.0
+
+    final_points = pd.concat([temp_df, sidewalk_with_metrics], ignore_index=True)
+
     source_las = laspy.read(original_las_path)
-    header = laspy.LasHeader(version=source_las.header.version, point_format=source_las.header.point_format.id)
+    header = laspy.LasHeader(
+        version=source_las.header.version,
+        point_format=source_las.header.point_format.id,
+    )
     header.offsets = source_las.header.offsets
     header.scales = source_las.header.scales
 
-    # Add the extra dimensions for our new features
     header.add_extra_dim(laspy.ExtraBytesParams(name="segment_id", type=np.int32))
     header.add_extra_dim(laspy.ExtraBytesParams(name="segment_overall_width", type=np.float32))
     header.add_extra_dim(laspy.ExtraBytesParams(name="segment_usable_width", type=np.float32))
     header.add_extra_dim(laspy.ExtraBytesParams(name="segment_slope_percent", type=np.float32))
 
     las_out = laspy.LasData(header)
-    # final_points=final_points.loc[final_points["classification"] == SIDEWALK_LABEL]
-    # final_points=final_sidewalk_with_metrics
-    # final_points=sidewalk_with_metrics
-    
-    las_out.x, las_out.y, las_out.z = final_points["x"], final_points["y"], final_points["z"]
+    las_out.x = final_points["x"]
+    las_out.y = final_points["y"]
+    las_out.z = final_points["z"]
     las_out.classification = final_points["classification"]
     las_out.segment_id = final_points["segment_id"].astype(np.int32)
     las_out.segment_overall_width = final_points["overall_width_m"].astype(np.float32)
@@ -366,20 +377,22 @@ def save_segmented_points_as_laz(
     las_out.segment_slope_percent = final_points["slope_percent"].astype(np.float32)
 
     las_out.write(output_path)
-    
-    #saving sidewalk points as separate laz
-    las_out2=laspy.LasData(header)
-    las_out2.x, las_out2.y, las_out2.z = sidewalk_with_metrics["x"], sidewalk_with_metrics["y"], sidewalk_with_metrics["z"]
+
+    las_out2 = laspy.LasData(header)
+    las_out2.x = sidewalk_with_metrics["x"]
+    las_out2.y = sidewalk_with_metrics["y"]
+    las_out2.z = sidewalk_with_metrics["z"]
     las_out2.classification = sidewalk_with_metrics["classification"]
     las_out2.segment_id = sidewalk_with_metrics["segment_id"].astype(np.int32)
     las_out2.segment_overall_width = sidewalk_with_metrics["overall_width_m"].astype(np.float32)
     las_out2.segment_usable_width = sidewalk_with_metrics["usable_width_m"].astype(np.float32)
     las_out2.segment_slope_percent = sidewalk_with_metrics["slope_percent"].astype(np.float32)
-    
-    las_out2_path=output_path.parent / "sidewalk_segmented_points.laz"
+
+    las_out2_path = output_path.parent / "sidewalk_segmented_points.laz"
     las_out2.write(las_out2_path)
-    
+
     print(f"Saved all points with sidewalk width data: {output_path}")
+    print(f"Saved sidewalk-only segmented points: {las_out2_path}")
 
 
 def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
@@ -395,7 +408,10 @@ def save_boundary_metric_outputs(summary: dict, output_dir: Path) -> None:
 
 def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -> None:
     points = load_laz_points(input_path)
-    metrics, skipped_unrealistic_segments, segmented_sidewalk = compute_segment_metrics(points, segment_size)
+    metrics, skipped_unrealistic_segments, segmented_sidewalk = compute_segment_metrics(
+        points,
+        segment_size,
+    )
 
     summary = summarise_segment_metrics(metrics, skipped_unrealistic_segments)
     summary["input_file"] = str(input_path)
@@ -405,8 +421,7 @@ def run_point_metrics(input_path: Path, output_dir: Path, segment_size: float) -
     )
 
     save_point_metric_outputs(metrics, summary, output_dir)
-    
-    # save outputs to a laz file
+
     laz_output_path = output_dir / "city_with_segments.laz"
     save_segmented_points_as_laz(
         output_path=laz_output_path,
@@ -452,7 +467,7 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default="outputs/",
+        default="outputs",
         help="Output directory.",
     )
     parser.add_argument(
@@ -463,13 +478,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--metric-city",
-        default='bologna',
-        help="city_name of the input file.",
+        default=None,
+        help="Optional city name for output folder. If omitted, it is inferred automatically.",
     )
 
     args = parser.parse_args()
-    output_dir = Path(args.output)
-    output_dir=Path(os.path.join(output_dir,args.metric_city))
+
+    base_output_dir = Path(args.output)
+
+    input_path_for_city = Path(args.input_metric) if args.input_metric else None
+    city_name = args.metric_city or infer_city_name(
+        file_path=input_path_for_city,
+        output_path=base_output_dir,
+    )
+
+    output_dir = base_output_dir / city_name
 
     has_point_input = args.input_metric is not None
     has_boundary_input = args.kerb_file is not None and args.hfe_file is not None
