@@ -46,40 +46,39 @@ def main(args_list=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
 
-    # ── Step 1: Load ──────────────────────────────────────────────
+    # Step 1: Load 
     print("\n[1/6] Loading point cloud...")
     cloud = load_point_cloud(args.input)
 
-    # ── Step 2: Subsample (optional) ──────────────────────────────
+    # Step 2: Subsample (optional) 
     if args.subsample:
         print(f"\n[2/6] Subsampling at {args.subsample}m...")
         cloud = subsample(cloud, voxel_size=args.subsample)
     else:
         print("\n[2/6] Subsampling: skipped")
 
-    # ── Step 3: Compute geometric features ────────────────────────
+    # Step 3: Compute geometric features
     print(f"\n[3/6] Computing geometric features (radii={args.radii})...")
     cloud = compute_all_features(cloud, radii=args.radii)
 
-    # ── Step 4: Remove noise ──────────────────────────────────────
+    # Step 4: Remove noise 
     print("\n[4/6] Removing noise...")
     cloud = remove_noise(cloud)
 
-    # ── Step 5: High/low split ────────────────────────────────────
+    # Step 5: High/low split 
     print(f"\n[5/6] Splitting high/low (threshold={args.height_split}m)...")
     low_cloud, high_cloud = split_high_low(
         cloud, height_threshold=args.height_split
     )
 
-    # Save outputs
     save_point_cloud(cloud, out_dir / "full_featured.laz")
     save_point_cloud(low_cloud, out_dir / "low_featured.laz")
     save_point_cloud(high_cloud, out_dir / "high_featured.laz")
 
-    # ── Step 6: Prepare training data ─────────────────────────────
+    # Step 6: Prepare training data 
     print("\n[6/6] Preparing training data...")
 
-    # Traditional ML format (for Person 2's testing/ branches)
+    # Traditional ML format (for Vency's testing/ branches)
     result = prepare_training_data(low_cloud)
     X_train, X_test, y_train, y_test, feature_names = result
     np.savez(
