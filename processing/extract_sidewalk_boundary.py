@@ -398,9 +398,11 @@ def compute_centrelines(hfe_lines, ki_lines):
     centrelines = []
 
     for i, (hfe, ki) in enumerate(zip(hfe_lines, ki_lines)):
+        # take midpoints directly
         n = max(len(hfe), len(ki))
 
         def resample(line, n):
+            # spread n evenly spaced points along the line
             dists = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(line[:, :2], axis=0), axis=1))])
             total = dists[-1]
             if total < 1e-9:
@@ -439,10 +441,12 @@ def stitch_lines(polys, close_gap=8.0, stitch_gap=6.0):
 
     result = [c.copy() for c in polys]
 
+    # first pass: close any rings where start and end are nearly touching
     for i, poly in enumerate(result):
         if 0 < np.linalg.norm(poly[0, :2] - poly[-1, :2]) < close_gap:
             result[i] = np.vstack([poly, poly[0]])
 
+    # second pass: stitch nearby open endpoints across different polylines
     for _ in range(20):
         merged = False
         used   = [False] * len(result)
@@ -492,6 +496,7 @@ def stitch_lines(polys, close_gap=8.0, stitch_gap=6.0):
         if not merged:
             break
 
+    # final pass: close any rings that are now within gap after stitching
     for i, c in enumerate(result):
         if 0 < np.linalg.norm(c[0, :2] - c[-1, :2]) < close_gap:
             result[i] = np.vstack([c, c[0]])
@@ -661,10 +666,14 @@ def save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, o
 
 def main():
     script_dir = Path(__file__).resolve().parent
-    out_dir    = script_dir.parent / "outputs"
 
     parser = argparse.ArgumentParser(description="Sidewalk Boundary Extraction")
-    parser.add_argument("input",               help="Path to classified LAZ file")
+    parser.add_argument("input",               nargs="?", default=None,
+                                               help="Path to classified LAZ file (standalone)")
+    parser.add_argument("--input-processing",  default=None,
+                                               help="Path to classified LAZ file (pipeline)")
+    parser.add_argument("--boundary-city",     default=None,
+                                               help="City name — sets output subfolder")
     parser.add_argument("--voxel-size",        type=float, default=0.25)
     parser.add_argument("--alpha",             type=float, default=0.3)
     parser.add_argument("--max-edge-len",      type=float, default=3.0)
@@ -677,6 +686,15 @@ def main():
     parser.add_argument("--street-label",      type=int,   default=STREET_LABEL)
     parser.add_argument("--interactive",       action="store_true")
     args = parser.parse_args()
+
+    input_path = args.input or args.input_processing
+    if not input_path:
+        parser.error("Provide an input file as a positional argument or via --input-processing.")
+
+    if args.boundary_city:
+        out_dir = script_dir.parent / "outputs" / args.boundary_city
+    else:
+        out_dir = script_dir.parent / "outputs"
 
     params = {
         "voxel_size":      args.voxel_size,
@@ -694,9 +712,9 @@ def main():
     print("=== Sidewalk Boundary Extraction Tool ===")
 
     if args.interactive:
-        interactive_loop(args.input, out_dir, params)
+        interactive_loop(input_path, out_dir, params)
     else:
-        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(args.input, params)
+        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(input_path, params)
         save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, out_dir, source_las)
         print("Done")
 
