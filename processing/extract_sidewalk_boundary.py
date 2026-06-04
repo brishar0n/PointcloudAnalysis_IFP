@@ -1,46 +1,3 @@
-"""
-Sidewalk Boundary Extraction Tool
-Ahmed Bassam Hamdan Almasri — RMIT University
-Pointcloud Analysis for Pedestrian Access
-
-This script takes a classified LAZ file and extracts the sidewalk boundary lines.
-I built this pipeline in five main stages:
-
-    1. Load & Down Sample   — Reads in LAZ files and retains one data point every 0.25 meters to create a grid.
-    2. Remove Noise         — Eliminates random, clustered points likely caused by sensor error or other sources.
-    3. Alpha Shape          — Identifies the outer edge of all sidewalk points.
-    4. Smart Line Fitting   — Divides sidewalks into sections and uses line-fitting methods to define each section’s two boundaries.
-    4a. HFE/KI              — Determines which side of the street is the building frontage (HFE) and which is the kerb (KI).
-    4b. Buffer Zones        — Calculates the distance from kerb to road centreline. 
-    5. Stitch & Close       — Bridges gaps and completes polygon edges to form complete streets.
-
-Outputs go to ../outputs/:
-  sidewalk_boundary_ALL.laz   — closed boundary polygons (label 10)
-  sidewalk_HFE.laz            — building-side lines (label 10)
-  sidewalk_KI.laz             — kerb-side lines (label 11)
-  sidewalk_centreline.laz     — walking centreline between HFE and KI (label 12)
-  sidewalk_buffer_zones.csv   — buffer width categories per strip
-                                (Not present / Narrow <20cm / Medium 20-70cm / Wide >70cm)
-
-Usage:
-  python extract_sidewalk_boundary.py ../data/utrecht_classified.laz
-  python extract_sidewalk_boundary.py ../data/utrecht_classified.laz --interactive
-
-
-CHANGELOG:
-    v1 - Initial basic alpha shape boundary extraction code producing a single closed polygon
-    v2 - PCA-based slice of sidewalk data to isolate individual left/right edges as separate lines from the original single row
-    v3 - Implemented HFE/KI side assignment using street point distance comparison
-    After researching other methods (mean distance), I found that the use of the smallest distance provided more reliable results in determining the kerb-side
-    v4 - Developed an algorithm to determine whether or not there is a buffer zone, and if so which category it falls under (Not Present/Narrow (< 20 cm)/Medium (20-70 cm)/Wide (> 70 cm)) as per Hendrik’s width specifications document
-    v5 - Included a strip merge function to account for sidewalks being broken apart due to scan gaps
-    I researched both clustering and direction-matching for merging strips; however, I did not find either approach effective enough
-    v6 - Provided an interactive mode with real-time matplotlib preview allowing easier parameter adjustment
-    I also tried using RDP Line Simplification and found it to be less desirable than my previous implementation (Rolling Average Smoothing) in terms of performance on curvy areas
-    v7 - Improved error checking for missing files and incorrect labels
-    Completed final ring closure for more stable polygon output in Stage 5
-"""
-
 from __future__ import annotations
 import argparse
 import sys
@@ -49,8 +6,6 @@ from pathlib import Path
 import laspy
 import numpy as np
 from scipy.spatial import ConvexHull, Delaunay, cKDTree
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components
 
 SIDEWALK_LABEL = 2
 STREET_LABEL   = 11
@@ -73,8 +28,7 @@ def load_sidewalk(path, label=SIDEWALK_LABEL, voxel=0.25):
 
     print("  Labels in the file:")
     for lbl, count in zip(*np.unique(labels, return_counts=True)):
-        tag = " <-- sidewalk" if lbl == label else ""
-        print(f"    Label {lbl}: {count:,} points{tag}")
+        print(f"    Label {lbl}: {count:,} points")
 
     if label not in np.unique(labels):
         sys.exit(f"ERROR: Label {label} not found in file. "
@@ -91,20 +45,18 @@ def load_sidewalk(path, label=SIDEWALK_LABEL, voxel=0.25):
     if len(pts) < 50:
         sys.exit(f"ERROR: Only {len(pts)} sidewalk points found. "
                  f"Check --sidewalk-label or the quality of the ML classification.")
+    grid        = np.floor(pts[:, :2] / voxel).astype(np.int64)
+    _, inv, cnt = np.unique(grid, axis=0, return_inverse=True, return_counts=True)
+    n_cells     = cnt.shape[0]
+    xy_sum      = np.zeros((n_cells, 2))
+    z_vals      = [[] for _ in range(n_cells)]
+    np.add.at(xy_sum, inv, pts[:, :2])
+    for idx, cell in enumerate(inv):
+        z_vals[cell].append(pts[idx, 2])
+    result        = np.zeros((n_cells, 3))
+    result[:, :2] = xy_sum / cnt[:, None]
+    result[:, 2]  = np.array([np.median(z) for z in z_vals])
 
-    # grid-based downsampling — keeps one point per voxel cell, uses median Z
-    # this reduces noise from overlapping scan lines without losing coverage
-    grid   = np.floor(pts[:, :2] / voxel).astype(np.int64)
-    _, inv = np.unique(grid, axis=0, return_inverse=True)
-
-    downsampled = []
-    for i in range(inv.max() + 1):
-        members = pts[inv == i]
-        row     = members[0].copy()
-        row[2]  = np.median(members[:, 2])
-        downsampled.append(row)
-
-    result = np.array(downsampled)
     print(f"  Downsampled to {len(result):,} points (voxel = {voxel}m)")
     return result
 
@@ -169,9 +121,6 @@ def remove_noise(pts, dist=5.0, min_pts=30):
 def find_edges(pts2d, alpha=0.3):
     print(f"\n[Stage 3] Computing alpha shape (alpha={alpha})")
 
-    # alpha shape uses Delaunay triangulation — keeps only triangles whose
-    # circumradius is smaller than 1/alpha. smaller alpha = tighter shape.
-    # if it fails or produces too few edges, we fall back to convex hull.
     try:
         tri        = Delaunay(pts2d)
         edge_count = {}
@@ -214,251 +163,188 @@ def _hull_edges(pts2d):
     return [(v[i], v[(i+1) % len(v)]) for i in range(len(v))]
 
 
-def filter_edges(pts, edges, min_len=0.1):
+def filter_edges(pts, edges, min_len=0.1, max_len=3.0):
     return [(a, b) for a, b in edges
-            if np.linalg.norm(pts[a, :2] - pts[b, :2]) >= min_len]
+            if min_len <= np.linalg.norm(pts[a, :2] - pts[b, :2]) <= max_len]
 
 
-# --- Stage 4: Smart Line Fitting ---
+# --- Stage 4: Classify Boundary Edges ---
 
-def find_strips(pts, cluster_dist=2.5, min_pts=30):
-    print(f"  Clustering points into sidewalk strips (dist={cluster_dist}m)...")
+def chain_edges(edges, pts):
+    """Walk connected alpha shape edges into ordered polylines."""
+    from collections import defaultdict
 
-    tree  = cKDTree(pts[:, :2])
-    pairs = tree.query_pairs(r=cluster_dist, output_type='ndarray')
+    if not edges:
+        return []
 
-    if len(pairs) == 0:
-        return [pts]
+    adj = defaultdict(list)
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
 
-    n   = len(pts)
-    mat = csr_matrix(
-        (np.ones(len(pairs), dtype=np.float32), (pairs[:, 0], pairs[:, 1])),
-        shape=(n, n)
-    )
-    n_comp, labels = connected_components(mat, directed=False)
+    all_nodes   = set(adj.keys())
+    visited     = set()
+    chains      = []
+    endpoints   = [n for n in all_nodes if len(adj[n]) == 1]
+    start_queue = endpoints + [n for n in all_nodes if len(adj[n]) != 1]
 
-    strips = []
-    for i in range(n_comp):
-        mask = labels == i
-        if mask.sum() >= min_pts:
-            strips.append(pts[mask])
+    for start in start_queue:
+        if start in visited:
+            continue
+        chain   = [start]
+        visited.add(start)
+        current = start
+        while True:
+            nxt = [n for n in adj[current] if n not in visited]
+            if not nxt:
+                break
+            current = nxt[0]
+            chain.append(current)
+            visited.add(current)
+        if len(chain) >= 2:
+            chains.append(pts[np.array(chain)])
 
-    print(f"  Found {len(strips)} strips")
-    return strips
+    return chains
 
 
-def merge_strips(strips, merge_dist=8.0, angle_threshold=0.85):
+def smooth_chains(edges, pts, window=5, min_component=10):
     """
-    Merge strip segments that represent the same walkway but were separated by scanning gaps.
-    The decision whether or not to merge two strips is based on both the orientation of the strips, and the length from an end point for each strip.
-    The angle threshold determines how parallel the strips have to be in order to merge them (an angle of .85 radians will result in a merged line with a maximum angle of 32 degrees).
+    Chain alpha shape edges into one polyline per connected component,
+    then apply a rolling average to smooth out the wiggle.
     """
-    if len(strips) <= 1:
-        return strips
+    from collections import defaultdict
+    print("\n[Stage 4a] Chaining and smoothing alpha shape edges:")
 
-    def get_direction(pts):
-        centre  = pts[:, :2].mean(axis=0)
-        _, vecs = np.linalg.eigh(np.cov((pts[:, :2] - centre).T))
-        return vecs[:, -1]
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
 
-    def get_ends(pts):
-        centre  = pts[:, :2].mean(axis=0)
-        _, vecs = np.linalg.eigh(np.cov((pts[:, :2] - centre).T))
-        along   = vecs[:, -1]
-        proj    = (pts[:, :2] - centre) @ along
-        return pts[np.argmin(proj)], pts[np.argmax(proj)]
-
-    result = [s.copy() for s in strips]
-    merged = True
-
-    while merged:
-        merged     = False
-        used       = [False] * len(result)
-        new_strips = []
-
-        for i in range(len(result)):
-            if used[i]:
+    visited    = set()
+    components = []
+    for start in adj:
+        if start in visited:
+            continue
+        comp  = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node in visited:
                 continue
-            cur    = result[i]
-            dir_i  = get_direction(cur)
-            ends_i = get_ends(cur)
+            visited.add(node)
+            comp.add(node)
+            stack.extend(adj[node] - visited)
+        if len(comp) >= min_component:
+            components.append(comp)
 
-            for j in range(i + 1, len(result)):
-                if used[j]:
-                    continue
-                other  = result[j]
-                dir_j  = get_direction(other)
-                ends_j = get_ends(other)
+    w = max(3, window)
+    w += (1 - w % 2)
 
-                if abs(np.dot(dir_i, dir_j)) < angle_threshold:
-                    continue
+    smoothed = []
+    for comp in components:
+        comp_edges  = [(a, b) for a, b in edges if a in comp]
+        comp_chains = chain_edges(comp_edges, pts)
+        for chain in comp_chains:
+            if len(chain) < w:
+                smoothed.append(chain)
+                continue
+            out = chain.copy()
+            for col in range(2):
+                padded      = np.pad(chain[:, col], w // 2, mode='edge')
+                out[:, col] = np.array([padded[i:i+w].mean() for i in range(len(chain))])
+            smoothed.append(out)
 
-                close = any(np.linalg.norm(a[:2] - b[:2]) < merge_dist
-                            for a in ends_i for b in ends_j)
-
-                if close:
-                    cur    = np.vstack([cur, other])
-                    used[j] = True
-                    merged  = True
-                    dir_i   = get_direction(cur)
-                    ends_i  = get_ends(cur)
-
-            new_strips.append(cur)
-            used[i] = True
-
-        result = new_strips
-
-    print(f"  After merging: {len(result)} strips")
-    return result
+    print(f"  {len(smoothed)} boundary chains (smoothing window={w})")
+    return smoothed
 
 
-def fit_edge(x, y, z_vals, straightness_threshold):
-    spread = np.std(y)
-    center = np.mean(y)
+def classify_boundary(pts, edges, street_pts, min_component=10):
+    """
+    Split alpha shape edges into HFE (building-side) and KI (kerb-side) polylines.
+    Processes each connected component (= one sidewalk strip) independently so
+    edges from different strips are never mixed into the same chain.
+    """
+    from collections import defaultdict
 
-    if spread < straightness_threshold:
-        # side is straight — draw one line at the average lateral position.
-        # tried linear regression here first but it still zigzagged slightly
-        # when points were uneven. mean position is simpler and cleaner.
-        line_pts = np.array([[x[0], center], [x[-1], center]])
-        z_out    = np.array([z_vals[0], z_vals[-1]])
-        return line_pts, z_out, True
-    else:
-        # side is curved — apply rolling average to reduce noise but keep shape.
-        # tried RDP (Ramer-Douglas-Peucker) simplification here first but it
-        # made sharp corners at bends look wrong. rolling average is smoother.
-        window  = max(3, len(y) // 10)
-        window += (1 - window % 2)
-        padded  = np.pad(y, window // 2, mode="edge")
-        smoothed = np.array([padded[i:i+window].mean() for i in range(len(y))])
-        return np.column_stack([x, smoothed]), z_vals, False
+    print("\n[Stage 4] Classifying boundary into HFE / KI:")
 
-
-def fit_strip(strip_pts, slice_step, straightness_threshold, edge_percentile):
-    if len(strip_pts) < 10:
-        return None
-
-    strip_2d = strip_pts[:, :2]
-    strip_z  = strip_pts[:, 2]
-
-    centre  = strip_2d.mean(axis=0)
-    _, vecs = np.linalg.eigh(np.cov((strip_2d - centre).T))
-    along   = vecs[:, -1]
-    across  = vecs[:, -2]
-
-    shifted    = strip_2d - centre
-    along_proj = shifted @ along
-    side_proj  = shifted @ across
-
-    proj_min, proj_max = along_proj.min(), along_proj.max()
-    if proj_max - proj_min < slice_step * 2:
-        return None
-
-    cuts = np.arange(proj_min, proj_max + slice_step, slice_step)
-    left_pts, right_pts, left_z, right_z = [], [], [], []
-
-    for i in range(len(cuts) - 1):
-        mask = (along_proj >= cuts[i]) & (along_proj < cuts[i+1])
-        if mask.sum() < 3:
-            continue
-
-        ac  = side_proj[mask]
-        zs  = strip_z[mask]
-        mid = (cuts[i] + cuts[i+1]) / 2.0
-
-        
-        edge_hi = np.percentile(ac, 100.0 - edge_percentile)
-        edge_lo = np.percentile(ac, edge_percentile)
-
-        left_pts.append([mid, ac[np.argmin(np.abs(ac - edge_hi))]])
-        right_pts.append([mid, ac[np.argmin(np.abs(ac - edge_lo))]])
-        left_z.append(zs[np.argmin(np.abs(ac - edge_hi))])
-        right_z.append(zs[np.argmin(np.abs(ac - edge_lo))])
-
-    if len(left_pts) < 2:
-        return None
-
-    left_arr  = np.array(left_pts)
-    right_arr = np.array(right_pts)
-    left_z_arr  = np.array(left_z)
-    right_z_arr = np.array(right_z)
-
-    left_fit,  left_z_out,  left_straight  = fit_edge(left_arr[:,  0], left_arr[:,  1], left_z_arr,  straightness_threshold)
-    right_fit, right_z_out, right_straight = fit_edge(right_arr[:, 0], right_arr[:, 1], right_z_arr, straightness_threshold)
-
-    def unproject(local_2d, z_out):
-        xy = centre + local_2d[:, 0:1] * along + local_2d[:, 1:2] * across
-        return np.column_stack([xy, z_out])
-
-    return (unproject(left_fit,  left_z_out),
-            unproject(right_fit, right_z_out),
-            left_straight, right_straight)
-
-
-def fit_lines(pts, slice_step=0.5, straightness=1.5,
-              edge_percentile=2.0, cluster_dist=2.5, merge_dist=8.0):
-    print("\n[Stage 4] Fitting lines to sidewalk strips:")
-
-    strips = find_strips(pts, cluster_dist=cluster_dist)
-    strips = merge_strips(strips, merge_dist=merge_dist)
-
-    all_lines = []
-    all_sides = []
-
-    for i, strip in enumerate(strips):
-        res = fit_strip(strip, slice_step, straightness, edge_percentile)
-        if res is None:
-            print(f"  Strip {i}: too small, skipped")
-            continue
-
-        line_a, line_b, left_straight, right_straight = res
-        print(f"  Strip {i}: {len(strip):,} pts | "
-              f"left={'straight' if left_straight else 'curved'} | "
-              f"right={'straight' if right_straight else 'curved'}")
-
-        closed = np.vstack([line_a, line_b[::-1], line_a[[0]]])
-        all_lines.append(closed)
-        all_sides.append((line_a, line_b))
-
-    if not all_lines:
-        print("  Warning: No valid lines generated")
-        return None, []
-
-    print(f"  Generated {len(all_lines)} closed boundaries")
-    return all_lines, all_sides
-
-
-# --- Stage 4b: HFE / KI Assignment ---
-
-def label_sides(all_sides, street_pts):
-    print("\n[Stage 4b] Assigning HFE (building) and KI (kerb) sides:")
-
-    if len(street_pts) == 0:
-        print("  No street points available, skipping side assignment")
+    if not edges or len(street_pts) == 0:
+        print("  No edges or street points — cannot classify")
         return [], []
 
-    tree      = cKDTree(street_pts[:, :2])
-    hfe_lines = []
-    ki_lines  = []
+    tree = cKDTree(street_pts[:, :2])
 
-    for i, (line_a, line_b) in enumerate(all_sides):
-        # that were far from the road, pulling the average up even though the
-        # line was clearly on the road side. min() correctly identifies the
-        # side that actually touches the road edge.
-        min_dist_a = tree.query(line_a[:, :2], k=1)[0].min()
-        min_dist_b = tree.query(line_b[:, :2], k=1)[0].min()
+    # Find connected components of the alpha shape so each strip is isolated
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
 
-        if min_dist_a < min_dist_b:
-            ki, hfe = line_a, line_b
-        else:
-            ki, hfe = line_b, line_a
+    visited    = set()
+    components = []
+    for start in adj:
+        if start in visited:
+            continue
+        comp  = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            comp.add(node)
+            stack.extend(adj[node] - visited)
+        if len(comp) >= min_component:
+            components.append(comp)
 
-        hfe_lines.append(hfe)
-        ki_lines.append(ki)
-        print(f"  Strip {i}: KI min dist = {min(min_dist_a, min_dist_b):.2f}m | "
-              f"HFE min dist = {max(min_dist_a, min_dist_b):.2f}m")
+    print(f"  Found {len(components)} boundary components")
 
-    return hfe_lines, ki_lines
+    matched_hfe, matched_ki = [], []
+
+    for i, comp_nodes in enumerate(components):
+        comp_edges = [(a, b) for a, b in edges if a in comp_nodes]
+
+        dists = np.array([
+            tree.query((pts[a, :2] + pts[b, :2]) / 2.0, k=1)[0]
+            for a, b in comp_edges
+        ])
+
+        # 2-cluster k-means on distances — finds natural KI/HFE groups
+        # regardless of whether the two sides have equal numbers of edges
+        centers = np.array([dists.min(), dists.max()])
+        for _ in range(20):
+            labels  = np.argmin(np.abs(dists[:, None] - centers), axis=1)
+            new_c   = np.array([dists[labels == j].mean() if (labels == j).any()
+                                 else centers[j] for j in range(2)])
+            if np.allclose(centers, new_c):
+                break
+            centers = new_c
+
+        ki_cluster = int(np.argmin(centers))
+        ki_edges   = [e for e, l in zip(comp_edges, labels) if l == ki_cluster]
+        hfe_edges  = [e for e, l in zip(comp_edges, labels) if l != ki_cluster]
+
+        ki_chains  = chain_edges(ki_edges,  pts)
+        hfe_chains = chain_edges(hfe_edges, pts)
+
+        if not ki_chains or not hfe_chains:
+            continue
+
+        ki_best  = max(ki_chains,  key=len)
+        hfe_best = max(hfe_chains, key=len)
+
+        # Final sanity check — if KI ended up further from road than HFE, swap them
+        ki_mean  = tree.query(ki_best[:,  :2], k=1)[0].mean()
+        hfe_mean = tree.query(hfe_best[:, :2], k=1)[0].mean()
+        if ki_mean > hfe_mean:
+            ki_best, hfe_best = hfe_best, ki_best
+            ki_mean, hfe_mean = hfe_mean, ki_mean
+
+        matched_hfe.append(hfe_best)
+        matched_ki.append(ki_best)
+        print(f"  Strip {i}: KI avg={ki_mean:.2f}m | HFE avg={hfe_mean:.2f}m")
+
+    return matched_hfe, matched_ki
 
 
 # --- Stage 4c: Buffer Zones ---
@@ -528,6 +414,7 @@ def compute_centrelines(hfe_lines, ki_lines):
         hfe_r = resample(hfe, n)
         ki_r  = resample(ki,  n)
 
+        # midpoint between the two lines
         centre = (hfe_r + ki_r) / 2.0
         centrelines.append(centre)
         print(f"  Strip {i}: centreline with {n} points")
@@ -696,19 +583,11 @@ def run_pipeline(input_path, params):
 
     pts   = remove_noise(pts)
     edges = find_edges(pts[:, :2], alpha=params["alpha"])
-    edges = filter_edges(pts, edges)
+    edges = filter_edges(pts, edges, max_len=params["max_edge_len"])
 
-    all_lines, all_sides = fit_lines(
-        pts,
-        slice_step=params["slice_step"],
-        straightness=params["straightness"],
-        edge_percentile=params["edge_percentile"],
-        cluster_dist=params["cluster_dist"],
-        merge_dist=params["merge_dist"]
-    )
+    result              = smooth_chains(edges, pts, window=params["smooth_window"])
+    hfe_lines, ki_lines = classify_boundary(pts, edges, street_pts)
 
-    result         = all_lines if all_lines is not None else []
-    hfe_lines, ki_lines = label_sides(all_sides, street_pts)
     centrelines    = compute_centrelines(hfe_lines, ki_lines)
     buffer_results = calc_buffers(ki_lines, street_pts)
 
@@ -719,19 +598,19 @@ def run_pipeline(input_path, params):
 
 def interactive_loop(input_path, out_dir, params):
     print("\n" + "="*65)
-    print("          INTERACTIVE MODE - tweak parameters live")
+    print("          INTERACTIVE MODE")
     print("="*65)
 
-    while True:
-        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(input_path, params)
+    source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(input_path, params)
 
+    while True:
         print("\nCurrent parameters:")
         for k, v in params.items():
             print(f"   {k:<18} = {v}")
 
         print("\nOptions:")
         print("   1 -> Show preview")
-        print("   2 -> Change parameter")
+        print("   2 -> Change parameter (re-runs pipeline)")
         print("   3 -> Save outputs and exit")
         print("   4 -> Exit without saving")
         choice = input("   Enter choice: ").strip()
@@ -741,21 +620,16 @@ def interactive_loop(input_path, out_dir, params):
 
         elif choice == "2":
             print("\nWhich parameter?")
-            print("   1 alpha          2 straightness     3 cluster_dist")
-            print("   4 merge_dist     5 slice_step       6 edge_percentile")
-            print("   7 voxel_size")
+            print("   1 alpha       2 voxel_size       3 max_edge_len       4 smooth_window")
             p = input("   Choice: ").strip()
 
-            param_map = {
-                "1": "alpha",      "2": "straightness",   "3": "cluster_dist",
-                "4": "merge_dist", "5": "slice_step",     "6": "edge_percentile",
-                "7": "voxel_size"
-            }
+            param_map = {"1": "alpha", "2": "voxel_size", "3": "max_edge_len", "4": "smooth_window"}
             if p in param_map:
                 key     = param_map[p]
                 new_val = input(f"   New value for {key} (current={params[key]}): ").strip()
                 if new_val:
                     params[key] = float(new_val)
+                    source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(input_path, params)
             else:
                 print("   Invalid option")
 
@@ -786,11 +660,15 @@ def save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, o
 # --- Entry Point ---
 
 def main():
+    script_dir = Path(__file__).resolve().parent
+    out_dir    = script_dir.parent / "outputs"
 
     parser = argparse.ArgumentParser(description="Sidewalk Boundary Extraction")
-    parser.add_argument("--input-processing",help="Path to classified LAZ file")
+    parser.add_argument("input",               help="Path to classified LAZ file")
     parser.add_argument("--voxel-size",        type=float, default=0.25)
     parser.add_argument("--alpha",             type=float, default=0.3)
+    parser.add_argument("--max-edge-len",      type=float, default=3.0)
+    parser.add_argument("--smooth-window",     type=int,   default=5)
     parser.add_argument("--slice-step",        type=float, default=0.5)
     parser.add_argument("--straightness",      type=float, default=1.5)
     parser.add_argument("--edge-percentile",   type=float, default=2.0)
@@ -798,13 +676,13 @@ def main():
     parser.add_argument("--merge-dist",        type=float, default=8.0)
     parser.add_argument("--street-label",      type=int,   default=STREET_LABEL)
     parser.add_argument("--interactive",       action="store_true")
-    parser.add_argument("--boundary-city", default=None)
     args = parser.parse_args()
 
     params = {
-        "input_processing": args.input_processing,
         "voxel_size":      args.voxel_size,
         "alpha":           args.alpha,
+        "max_edge_len":    args.max_edge_len,
+        "smooth_window":   args.smooth_window,
         "slice_step":      args.slice_step,
         "straightness":    args.straightness,
         "edge_percentile": args.edge_percentile,
@@ -814,13 +692,11 @@ def main():
     }
 
     print("=== Sidewalk Boundary Extraction Tool ===")
-    
-    out_dir = Path(f"outputs/{args.boundary_city}")
 
     if args.interactive:
-        interactive_loop(args.input_processing, out_dir, params)
+        interactive_loop(args.input, out_dir, params)
     else:
-        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(args.input_processing, params)
+        source_las, pts, edges, result, hfe_lines, ki_lines, centrelines, buffer_results = run_pipeline(args.input, params)
         save_all_outputs(result, hfe_lines, ki_lines, centrelines, buffer_results, out_dir, source_las)
         print("Done")
 
