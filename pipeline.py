@@ -144,6 +144,9 @@ def visualise(args):
     subprocess.run(cmd)
     subprocess.run(cmd2)
 
+    
+    # subprocess.run(cmd)
+
 def main():
     STREET_LABEL   = 11
     
@@ -229,7 +232,10 @@ def main():
     
     args = parser.parse_args()
     
-    
+    # comment out to run specific modules
+    # ensure that inputs for modules are defined through command line
+    # using relevant flags, or ready-to-use files are available in the 
+    # respective folders
     preprocessing(args)
     classification(args)
     boundary_extraction(args)
