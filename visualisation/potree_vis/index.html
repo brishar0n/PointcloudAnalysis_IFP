@@ -60,7 +60,7 @@
 		});
 		
 		// Potree.loadPointCloud("pointclouds/riga/city/cloud.js", "Bologna").then(function(e){
-		Potree.loadPointCloud("pointclouds/riga/city/cloud.js", "City").then(function(e){
+		Potree.loadPointCloud("pointclouds/bologna/city/cloud.js", "City").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
 			e.pointcloud.position.z = 0;
 			let material = e.pointcloud.material;
@@ -72,13 +72,13 @@
 			window.setDefaultScheme();
 		});
 
-		Potree.loadPointCloud("pointclouds/riga/sidewalk/cloud.js", "Sidewalk").then(function(e){
+		Potree.loadPointCloud("pointclouds/bologna/sidewalk/cloud.js", "Sidewalk").then(function(e){
 			viewer.scene.addPointCloud(e.pointcloud);
-			e.pointcloud.position.z = 0.5;
+			e.pointcloud.position.z = .7;
 			let material = e.pointcloud.material;
 			material.size = 3;
 			material.pointSizeType = Potree.PointSizeType.FIXED;
-			material.activeAttributeName = "classification";
+			material.activeAttributeName = "segment_usable_width";
 			
 			viewer.fitToScreen();
 			window.setDefaultScheme();
