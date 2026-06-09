@@ -1,10 +1,10 @@
-# Boundary Extraction Module (`feature/boundary-extraction`)
+# Preprocessing Module (`feature/pointcloud-loader`)
 
-PIC: Ahmed
+PIC: Brigitte
 
-Extracts sidewalk candidate points and boundary lines from classified LiDAR point cloud data. This module turns a collection of classified sidewalk points into usable geometry — boundary polygons, building-side and kerb-side lines, walking centrelines, and buffer-zone measurements.
+Loads LiDAR point cloud data (.LAZ/.LAS), computes geometric features, and prepares training datasets for the sidewalk classifier.
 
-This is the third stage of the Sidewalk Scanner pipeline. It takes the classified output from Vency's module (or geometric features directly from Brigitte's preprocessing) and produces boundary geometry that feeds into the width metrics module (Sujeeth).
+This is the first stage of the Sidewalk Scanner pipeline. Everything downstream (classification, boundary extraction, width metrics, visualisation) depends on the outputs from this module. The full end-to-end pipeline is orchestrated by `pipeline.py` (see below).
 
 ## Setup
 
@@ -14,139 +14,183 @@ Requires Python 3.9+.
 pip install -r requirements.txt
 ```
 
-Dependencies: `laspy[lazrs]`, `numpy`, `scipy`, `matplotlib`
+Dependencies: `laspy[lazrs]`, `numpy`, `scipy`, `open3d`
 
 ## Project structure
 
 ```
-├── processing/
-│   ├── extract_sidewalk_candidates.py   # Candidate point extraction (geometric or classifier-based)
-│   └── extract_sidewalk_boundary.py     # Full boundary line extraction pipeline
+├── pipeline.py                   # Full end-to-end pipeline (all 5 stages)
+├── run_preprocessing.py          # Preprocessing CLI entry point
+├── preprocessing/
+│   ├── loader.py                 # Read/write LAZ/LAS, subsampling
+│   ├── features_query_method.py  # Eigenvalues, roughness, height, density (Open3D)
+│   └── splitter.py               # High/low split, noise removal, train/test prep
 ├── requirements.txt
 └── README.md
 ```
 
 ## Quick start
 
-There are two scripts, used in sequence or independently.
-
-### Candidate extraction
-
-Filters likely sidewalk points, either geometrically or from classifier output.
+### Preprocessing only
 
 ```bash
-# Geometric baseline — filters using height, planarity, roughness
-python3 processing/extract_sidewalk_candidates.py "preprocessed/riga/low_featured.laz" -o "outputs/riga_sidewalk_geometry.laz"
+# Bologna — needs full feature computation, so subsample first
+python3 run_preprocessing.py datasets/bologna_subsampled.laz -o preprocessed/bologna --subsample 0.05
 
-# Classifier + cleanup — uses ML labels with geometric cleanup
-python3 processing/extract_sidewalk_candidates.py "classified/riga_mlp_classified.laz" -o "outputs/riga_sidewalk_classifier_cleaned.laz" --use-classifier --sidewalk-label 2
+# Riga, Utrecht, Vilnius — eigenvalues precomputed by IFP, runs much faster
+python3 run_preprocessing.py datasets/riga_subsampled.laz -o preprocessed/riga
+python3 run_preprocessing.py datasets/utrecht_subsampled.laz -o preprocessed/utrecht
+python3 run_preprocessing.py datasets/vilnius_subsampled.laz -o preprocessed/vilnius
 ```
 
-### Boundary extraction
+### Full pipeline (all stages)
 
-Takes a classified cloud and extracts the full set of boundary lines.
+`pipeline.py` runs preprocessing, classification, boundary extraction, width metrics, and visualisation end-to-end. It calls `run_preprocessing.main()` directly, then invokes each downstream module as a subprocess.
 
 ```bash
-python3 processing/extract_sidewalk_boundary.py data/utrecht_classified.laz
-
-# Interactive mode — real-time matplotlib preview for tuning parameters
-python3 processing/extract_sidewalk_boundary.py data/utrecht_classified.laz --interactive
+python3 pipeline.py datasets/utrecht_subsampled.laz --city utrecht --all --epochs 50
 ```
 
-## What the pipeline does
+The pipeline requires all module folders (classification, processing, metrics, visualisation) to be present in the same working tree.
 
-The boundary extraction script runs in five main stages:
+## What the preprocessing pipeline does
 
-1. **Load & downsample**: Reads the LAZ file and retains one point per 0.25m grid square, creating an even grid from the raw sidewalk points.
-2. **Remove noise**: Eliminates random, clustered points likely caused by sensor error or misclassification.
-3. **Alpha shape**: Computes the outer edge of all sidewalk points using a Delaunay-triangulation-based alpha shape (keeps triangles whose circumradius is smaller than 1/alpha; smaller alpha gives a tighter outline).
-4. **Smart line fitting**: Divides the sidewalk into strips and fits lines to define each strip's two boundaries. This stage also:
-   - **(4b) HFE/KI assignment**: Determines which boundary is the building frontage (Housing Front Equivalent, HFE) and which is the kerb side (Kerb Inside, KI) by comparing distances to street-class points — the smaller distance identifies the kerb side.
-   - **(4c) Buffer zones**: Calculates the distance from kerb to road centreline and categorises it (Not Present / Narrow < 20cm / Medium 20–70cm / Wide > 70cm) per the IFP width specification.
-   - **(4d) Walking centreline**: Computes the centreline between the HFE and KI boundaries.
-5. **Stitch & close**: Bridges gaps caused by scan breaks and closes polygon rings to form complete street boundaries.
+The preprocessing pipeline runs six steps in order:
 
-## Input
-
-The module accepts two kinds of input:
-
-| Input | Source | Use |
-|-------|--------|-----|
-| `preprocessed/<city>/low_featured.laz` | Brigitte's preprocessing | Geometric baseline (height, planarity, roughness) |
-| `classified/<city>_mlp_classified.laz` | Vency's classifier | Classifier-based extraction |
-
-**Classification labels used (from the classifier):**
-
-| Code | Label |
-|------|-------|
-| 0 | other |
-| 2 | sidewalk |
-| 11 | street/road |
+1. **Load**: Reads the .LAZ file, normalises field names, auto-detects and shifts absolute coordinates (e.g. Vilnius).
+2. **Subsample** (optional): Voxel-grid downsampling to reduce point count for faster iteration.
+3. **Compute geometric features**: Eigenvalues, roughness, planarity, linearity, height-above-ground, point density. Skips computation for datasets that already have IFP-precomputed values.
+4. **Remove noise**: Filters statistical outliers based on local point density.
+5. **High/low split**: Separates street-level points (sidewalks, roads, cars, furniture) from elevated points (buildings, tree canopies) using a height threshold.
+6. **Prepare training data**: Exports two formats for the classifier:
+   - Flat arrays (`train_data_flat.npz`) for traditional ML (k-means, random forest)
+   - Spatial blocks (`train_data_blocks.npz`) for deep learning (PointNet, RandLA-Net)
 
 ## Output
 
-The candidate extraction script produces:
+Each run produces:
 
 ```
-outputs/<city>_sidewalk_*.laz    # Extracted sidewalk candidate points
-outputs/<city>_*_summary.txt     # Thresholds and statistics
+preprocessed/<city>/
+├── full_featured.laz         # All points with all scalar fields attached
+├── low_featured.laz          # Street-level points only (input for classifier)
+├── high_featured.laz         # Buildings, trees, etc.
+├── train_data_flat.npz       # X_train, X_test, y_train, y_test, feature_names
+└── train_data_blocks.npz     # Spatial blocks of 4096 points for DL models
 ```
 
-The boundary extraction script produces:
-
-```
-outputs/sidewalk_boundary_ALL.laz    # Closed boundary polygons (label 10)
-outputs/sidewalk_HFE.laz             # Building-side lines (label 10)
-outputs/sidewalk_KI.laz              # Kerb-side lines (label 11)
-outputs/sidewalk_centreline.laz      # Walking centreline between HFE and KI (label 12)
-outputs/sidewalk_buffer_zones.csv    # Buffer width category per strip
-```
-
-Buffer-zone categories in the CSV: Not Present / Narrow (< 20cm) / Medium (20–70cm) / Wide (> 70cm).
-
-All `.laz` outputs can be opened in [CloudCompare](https://www.cloudcompare.org/).
+The `.laz` files can be opened in [CloudCompare](https://www.cloudcompare.org/) to visually inspect features. The `.npz` files are picked up by the classification module.
 
 ## CLI options
 
+### `run_preprocessing.py`
+
 ```
-python3 processing/extract_sidewalk_candidates.py <input.laz> [options]
+python3 run_preprocessing.py <input.laz> [options]
 
 Options:
-  -o, --output PATH         Output .laz path
-  --use-classifier          Use ML classification labels instead of geometric filtering
-  --sidewalk-label INT      Classification code for sidewalk (default: 2)
+  -o, --output DIR          Output directory (default: preprocessed/)
+  --subsample FLOAT         Voxel size in metres (e.g. 0.05). Omit to keep full resolution.
+  --radii FLOAT [FLOAT ..]  Radii for eigenvalue computation (default: 0.1 0.3 0.5)
+  --height-split FLOAT      Height threshold for high/low split in metres (default: 2.0)
+  --block-size FLOAT        Block size for DL training data in metres (default: 5.0)
+  --skip-blocks             Skip DL block preparation
 ```
 
-```
-python3 processing/extract_sidewalk_boundary.py <input.laz> [options]
+### `pipeline.py`
 
-Options:
-  --interactive             Real-time matplotlib preview for parameter tuning
-  --sidewalk-label INT      Classification code for sidewalk (default: 2)
-  --street-label INT        Classification code for street (default: 11)
+```
+python3 pipeline.py <input.laz> --city NAME [options]
+
+Required:
+  input                     Path to input .LAZ or .LAS file
+  --city NAME               City name (e.g. utrecht)
+
+Preprocessing options:
+  --subsample FLOAT         Voxel size for subsampling
+  --height-split FLOAT      Height threshold for high/low split (default: 2.0)
+  --block-size FLOAT        Block size for DL training data (default: 5.0)
+  --skip-blocks             Skip DL block preparation
+
+Classification options:
+  --all                     Run LOCO -> train -> apply
+  --loco                    Run LOCO cross-city evaluation
+  --train                   Train the final model
+  --apply                   Apply model to cities
+  --cities CITY [..]        Cities to apply to
+  --epochs INT              Training epochs (default: 50)
+
+Boundary extraction options:
+  --input-processing PATH   Classified LAZ file (defaults to classification output)
+  --voxel-size FLOAT        Downsample grid (default: 0.25)
+  --alpha FLOAT             Alpha shape parameter (default: 0.3)
+  --slice-step / --straightness / --edge-percentile / --cluster-dist / --merge-dist
+  --street-label INT        Street class code (default: 11)
+  --interactive             Interactive preview
+
+Width metrics options:
+  --input-metric PATH       Classified LAZ/LAS for point-based metrics
+  --kerb-file PATH          Kerb boundary file
+  --hfe-file PATH           HFE boundary file
+  --segment-size FLOAT      Segment size in metres (default: 1.0)
 ```
 
 ## Datasets
 
-| City | Status |
-|------|--------|
-| Riga | Geometric baseline tested |
-| Utrecht | Boundary extraction tested |
-| Vilnius | Supported |
-| Bologna | Avoided where unlabelled |
+| City | Points | Precomputed features | Coordinate note |
+|------|--------|---------------------|-----------------|
+| Bologna | 14.2M | `height_division` only | Shifted (local origin) |
+| Riga | 5.0M | Eigenvalues + roughness at 0.1, 0.5, 1.0m | Shifted |
+| Utrecht | 6.5M | Eigenvalues + roughness at 0.1, 0.5, 1.0m | Shifted |
+| Vilnius | 7.8M | Eigenvalues + roughness at 0.1, 0.5, 1.0m | Absolute (auto-shifted by loader) |
 
-The geometric baseline was implemented and tested first (on Riga), with classifier integration added once classified outputs became available from Vency's module.
+## Computed features
 
-## Current status
+For each point, the following scalar fields are computed (or derived from precomputed values):
 
-- Geometric candidate baseline implemented and tested (Riga)
-- Classifier-based candidate extraction implemented
-- Full boundary pipeline implemented through all five stages (alpha shape, HFE/KI assignment, buffer zones, centreline, stitch & close)
-- Interactive preview mode available for parameter tuning
+**Per radius (0.1m, 0.3m, 0.5m):**
+- `eigenvalue_1_{r}`, `eigenvalue_2_{r}`, `eigenvalue_3_{r}` — covariance eigenvalues (descending)
+- `linearity_{r}` — (λ1 − λ2) / λ1 — high for poles, wires, kerb edges
+- `planarity_{r}` — (λ2 − λ3) / λ1 — high for flat surfaces (ground, walls)
+- `scattering_{r}` — λ3 / λ1 — high for foliage, noise
+- `omnivariance_{r}` — (λ1 × λ2 × λ3)^(1/3)
+- `anisotropy_{r}` — (λ1 − λ3) / λ1
+- `roughness_{r}` — distance from point to local best-fit plane
+
+**Height features:**
+- `height_above_min`: Z minus lowest Z in local neighbourhood
+- `height_range`: max Z − min Z in neighbourhood
+- `height_std`: standard deviation of Z in neighbourhood
+- `normalized_z`: Z normalised globally to [0, 1]
+
+**Other:**
+- `density`: neighbour count within radius
+- `intensity_normalized`: laser intensity normalised to [0, 1]
+
+## Using the module in Python
+
+```python
+from preprocessing import load_point_cloud, compute_all_features, split_high_low
+
+# Load
+cloud = load_point_cloud("bologna_subsampled.laz")
+
+# Compute features (auto-skips if precomputed)
+cloud = compute_all_features(cloud, radii=[0.1, 0.3, 0.5])
+
+# Split
+low, high = split_high_low(cloud, height_threshold=2.0)
+
+# Prepare training data for classifier
+from preprocessing import prepare_training_data
+X_train, X_test, y_train, y_test, feature_names = prepare_training_data(low)
+```
+
+`run_preprocessing.main(args_list)` is also callable directly (used by `pipeline.py`) and returns the output directory.
 
 ## Notes for team
 
-- **Preprocessing (Brigitte):** The geometric baseline depends on your `low_featured.laz` output (height, planarity, roughness fields).
-- **Classification (Vency):** The main path uses your `classified/<city>_mlp_classified.laz`. The `--sidewalk-label` must match your model's output code (2).
-- **Width metrics (Sujeeth):** Your input is the boundary output from this module — the HFE and KI lines (as OBJ/LAS) and the classified sidewalk points. The buffer-zone CSV is also directly useful for your analysis.
-- **Visualisation (Aaron):** All `.laz` outputs open in CloudCompare. The boundary lines, centreline, and polygons each carry distinct labels (10, 11, 12) for easy colour separation.
+- **Classification (Vency):** Your inputs are `train_data_flat.npz` and `train_data_blocks.npz`. The flat format works for `testing/` branches (sklearn models). The block format works for `feature/sidewalk-classifier` (PointNet/RandLA-Net). Feature names are included in both files.
+- **Boundary extraction (Ahmed):** Use `low_featured.laz` as your starting point, it contains only street-level points with all features attached.
+- **Width metrics (Sujeeth):** Same, work from `low_featured.laz` or the classified output from Vency.
+- **Visualisation (Aaron):** All `.laz` outputs open directly in CloudCompare with features as scalar fields. The full `pipeline.py` invokes your PotreeConverter step last.
