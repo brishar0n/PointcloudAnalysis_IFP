@@ -1,6 +1,6 @@
 # Visualisation of Pointclouds
 
-PIC: Aaron Thomas
+**PIC: Aaron Thomas**
 
 Visualisation is acheived using Potree, an open source pointcloud viewer, that allows us to host our pointclouds on our local host, or even online.
 In the visualisation module, two basic steps are being executed - 
@@ -26,6 +26,19 @@ visualisation/
 │   │       ├──city
 │   │       └──sidewalk
 ```
-The visualisation is determined by the index.html file found in the same visualisation folder. 
+The visualisation is determined by the `index.html` file found in the same visualisation folder. 
 
-In order to see visualisations of the points that you have converted, simply change the path defined in the line - `Potree.loadPointCloud("pointclouds/bologna/city/cloud.js", "City")...` to the path of the new city that has been converted. Similarly you can do the same for the sidewalk points. 
+In order to see visualisations of the points that you have converted, simply change the path defined in the line - `Potree.loadPointCloud("pointclouds/bologna/city/cloud.js", "City")...` to the path of the new city that has been converted. Similarly you can do the same for the sidewalk points.
+
+Two buttons have been added to the visualisation, one to view the classification of the city points, this allows us to distinctly see the classification made between sidewalk and street points. The other button, allows us to see the segment widths calculated, with the widths highlighted according to the gradient colour scheme defined when loadinig the second pointcloud, in the line:<br>
+```javascript
+const gradient = [
+    [0.0,  new THREE.Color(0.25, 0.13, 0.0)],
+    [0.25, new THREE.Color(0.55, 0.27, 0.07)],
+    [0.5,  new THREE.Color(0.85, 0.53, 0.10)],
+    [0.75, new THREE.Color(0.95, 0.80, 0.0)],
+    [1.0,  new THREE.Color(1.0,  1.0,  0.0)]
+];
+```
+
+When viewing sidewalk segments, if you would like to see the overall width of the segments made rather than the usable width, in the line `pc.material.activeAttributeName = "segment_usable_width";` simply change the `segment_usable_width` to `segment_overall_width`
