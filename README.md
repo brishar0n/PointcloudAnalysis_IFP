@@ -100,3 +100,13 @@ python -m http.server 8000
 ```
 
 Then open the visualisation in a browser at **http://localhost:8000/**.
+
+## Module READMEs
+
+For detail on each stage, see the README in its module folder:
+
+- **Preprocessing** — `preprocessing/` (Brigitte)
+- **Classification** — `classification/` (Vency)
+- **Boundary extraction** — `processing/` (Ahmed)
+- **Width metrics** — `metrics/` (Sujeeth)
+- **Visualisation** — `visualisation/` (Aaron)
