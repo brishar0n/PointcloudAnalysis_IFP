@@ -1,7 +1,23 @@
-To run the entire pipeline, run the following command: `python .\pipeline.py {path to dataset} --city {name of city used} --all`
-example: `python .\pipeline.py datasets\bologna_subsampled.laz --city bologna --all`
+# Pointcloud Analysis for Pedestrian Access
 
-Ensure that all datasets that are to be preprocessed go into a dataset folder taht follows this hierarchy:
+PIC: Team HN-677 (pipeline integration: Aaron)
+
+End-to-end pipeline that analyses LiDAR point cloud scans of urban streets to extract pedestrian sidewalk accessibility metrics. Developed for the International Federation of Pedestrians (IFP).
+
+The system runs as five connected stages — preprocessing, classification, boundary extraction, width metrics, and visualisation — chained together by a single `pipeline.py`. Each stage has its own module README with full detail; this document covers running the whole pipeline.
+
+## Setup
+
+Requires Python 3.9+ (Windows for the Potree visualisation step).
+
+```bash
+pip install -r requirements.txt
+```
+
+## Project structure
+
+Datasets must be placed in a `datasets/` folder following this hierarchy:
+
 ```text
 POINTCLOUDANALYSIS_IFP/
 ├── classification/
@@ -21,15 +37,48 @@ POINTCLOUDANALYSIS_IFP/
 └── requirements.txt
 ```
 
-All preprocessed files are found in the `classification\preprocessed` folder.
+## Quick start
 
-**For the classification process:**
-Each city's input is a single file: `preprocessed/<city>/low_featured.laz`
+Run the entire pipeline with a single command:
 
-If these files are available to use, since preprocessing is very time consuming, you could comment out the `preprocessing() function` from the pipeline.py in the main function to simply run the classification -> processing -> width_metrics -> visualisation pipeline. 
+```bash
+python .\pipeline.py <path to dataset> --city <name of city> --all
+```
 
-**For visualisation, once pipeline.py has been completely executed, change the cwd using `cd` in the terminal to `visualisation\potree_vis`**
-The output for required potree conversion of pointclouds is found in the `visualisation\potree_vis\pointclouds` folder, following the hierarchy:
+Example:
+
+```bash
+python .\pipeline.py datasets\bologna_subsampled.laz --city bologna --all
+```
+
+This runs all five stages in order: preprocessing → classification → boundary extraction → width metrics → visualisation.
+
+## What the pipeline does
+
+| Stage | Module | Role |
+|-------|--------|------|
+| 1. Preprocessing | `preprocessing/` | Reads the scan, computes geometric features, exports training data |
+| 2. Classification | `classification/` | Classifies points as sidewalk, street, or other |
+| 3. Boundary extraction | `processing/` | Traces sidewalk boundary lines (frontage and kerb sides) |
+| 4. Width metrics | `metrics/` | Measures overall width, usable width, slope, and obstacles |
+| 5. Visualisation | `visualisation/` | Converts clouds for the interactive Potree 3D viewer |
+
+Each stage has a dedicated README in its module folder with full setup, options, and output details.
+
+## Skipping preprocessing (optional)
+
+Preprocessing is the most time-consuming stage. If the preprocessed files are already available, you can skip it: comment out the `preprocessing()` function call in the `main` function of `pipeline.py`. The pipeline will then run classification → boundary extraction → width metrics → visualisation directly.
+
+Preprocessed files live in `classification/preprocessed/`, and each city's classification input is a single file:
+
+```text
+preprocessed/<city>/low_featured.laz
+```
+
+## Viewing the visualisation
+
+Once `pipeline.py` has finished, the converted point clouds are written to `visualisation/potree_vis/pointclouds/`, following this hierarchy:
+
 ```text
 visualisation/
 ├── potree_vis/
@@ -37,12 +86,17 @@ visualisation/
 │   ├── libs/
 │   ├── pointclouds/
 │   │   └── <city>/
-│   │       ├──city
-│   │       └──sidewalk
+│   │       ├── city        # all points in the city
+│   │       └── sidewalk    # sidewalk points only
 │   └── index.html
-└── PotreeConverter_1.7_windows_x64   
-
-where city and sidewalk folders in the <city> folder, contain the converted pointclouds consisting of all points in the city, and only sidewalk points respectively.
-
+└── PotreeConverter_1.7_windows_x64/
 ```
-Having changed the cwd, run the command `python -m http.server 8000`, which runs runs the potree visualisation on the localhost which can be seen using the link: **http://localhost:8000/**.
+
+To launch the viewer, change into the Potree directory and start a local server:
+
+```bash
+cd visualisation\potree_vis
+python -m http.server 8000
+```
+
+Then open the visualisation in a browser at **http://localhost:8000/**.
