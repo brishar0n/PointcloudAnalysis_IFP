@@ -1,3 +1,8 @@
+# Visualisation of Pointclouds
+
+PIC: Aaron Thomas
+
+Visualisation is acheived using Potree, an open source pointcloud viewer, that allows us to host our pointclouds on our local host, or even online.
 In the visualisation module, two basic steps are being executed - 
 
 `Pointcloud conversion --> Visualisation using Potree`.
