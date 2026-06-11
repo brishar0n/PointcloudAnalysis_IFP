@@ -1,6 +1,6 @@
 # Pointcloud Analysis for Pedestrian Access
 
-PIC: Team HN-677 (pipeline integration: Aaron)
+PIC: Team HN-677 
 
 End-to-end pipeline that analyses LiDAR point cloud scans of urban streets to extract pedestrian sidewalk accessibility metrics. Developed for the International Federation of Pedestrians (IFP).
 
