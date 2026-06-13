@@ -1,152 +1,132 @@
-# Boundary Extraction Module (`feature/boundary-extraction`)
+And and do not change any meanings of words, dates or facts.
 
-PIC: Ahmed
+Do not return anything but a redone version of this text!
 
-Extracts sidewalk candidate points and boundary lines from classified LiDAR point cloud data. This module turns a collection of classified sidewalk points into usable geometry — boundary polygons, building-side and kerb-side lines, walking centrelines, and buffer-zone measurements.
+# sidewalk boundary extraction
 
-This is the third stage of the Sidewalk Scanner pipeline. It takes the classified output from Vency's module (or geometric features directly from Brigitte's preprocessing) and produces boundary geometry that feeds into the width metrics module (Sujeeth).
+Extracts hfe (Building-side) and ki (Kerb-side) boundary lines from a classified LiDAR point cloud. The output of the ML classifier is used to create georeferenced boundary polylines, a walking centerline and Buffer zone measurements which align to IFP accessibility standards.
 
-## Setup
+---
 
-Requires Python 3.9+.
+## requirements
 
-```bash
-pip install -r requirements.txt
-```
-
-Dependencies: `laspy[lazrs]`, `numpy`, `scipy`, `matplotlib`
-
-## Project structure
+- python 3.10+
 
 ```
-├── processing/
-│   ├── extract_sidewalk_candidates.py   # Candidate point extraction (geometric or classifier-based)
-│   └── extract_sidewalk_boundary.py     # Full boundary line extraction pipeline
-├── requirements.txt
-└── README.md
+Pip install laspy[lazrs] numpy scipy matplotlib
 ```
 
-## Quick start
+---
+### Standalone
 
-There are two scripts, used in sequence or independently.
-
-### Candidate extraction
-
-Filters likely sidewalk points, either geometrically or from classifier output.
-
-```bash
-# Geometric baseline — filters using height, planarity, roughness
-python3 processing/extract_sidewalk_candidates.py "preprocessed/riga/low_featured.laz" -o "outputs/riga_sidewalk_geometry.laz"
-
-# Classifier + cleanup — uses ML labels with geometric cleanup
-python3 processing/extract_sidewalk_candidates.py "classified/riga_mlp_classified.laz" -o "outputs/riga_sidewalk_classifier_cleaned.laz" --use-classifier --sidewalk-label 2
+```
+Python extract_sidewalk_boundary.py
 ```
 
-### Boundary extraction
+### via pipeline
 
-Takes a classified cloud and extracts the full set of boundary lines.
-
-```bash
-python3 processing/extract_sidewalk_boundary.py data/utrecht_classified.laz
-
-# Interactive mode — real-time matplotlib preview for tuning parameters
-python3 processing/extract_sidewalk_boundary.py data/utrecht_classified.laz --interactive
+```
+Python extract_sidewalk_boundary.py --input-processing --boundary-city
 ```
 
-## What the pipeline does
+### interactive mode (parameter tuning)
 
-The boundary extraction script runs in five main stages:
+```
+Python extract_sidewalk_boundary.py --interactive
+```
 
-1. **Load & downsample**: Reads the LAZ file and retains one point per 0.25m grid square, creating an even grid from the raw sidewalk points.
-2. **Remove noise**: Eliminates random, clustered points likely caused by sensor error or misclassification.
-3. **Alpha shape**: Computes the outer edge of all sidewalk points using a Delaunay-triangulation-based alpha shape (keeps triangles whose circumradius is smaller than 1/alpha; smaller alpha gives a tighter outline).
-4. **Smart line fitting**: Divides the sidewalk into strips and fits lines to define each strip's two boundaries. This stage also:
-   - **(4b) HFE/KI assignment**: Determines which boundary is the building frontage (Housing Front Equivalent, HFE) and which is the kerb side (Kerb Inside, KI) by comparing distances to street-class points — the smaller distance identifies the kerb side.
-   - **(4c) Buffer zones**: Calculates the distance from kerb to road centreline and categorises it (Not Present / Narrow < 20cm / Medium 20–70cm / Wide > 70cm) per the IFP width specification.
-   - **(4d) Walking centreline**: Computes the centreline between the HFE and KI boundaries.
-5. **Stitch & close**: Bridges gaps caused by scan breaks and closes polygon rings to form complete street boundaries.
+Interactive mode allows you to view results and modify Parameters without having to run everything again each time.
 
-## Input
+---
+## Parameters
 
-The module accepts two kinds of input:
+| parameter | default value | description |
+| --- | --- | --- |
+| `--Voxel-size` | 0.25 | downsampling Voxel grid size in metres |
+| `--Alpha` | 0.3 | Alpha shape tightness - lower = looser boundary higher = tighter |
+| `--max-edge-len` | 3.0 | edge length max (in metres) - filters out road crossing edges |
+| `--smooth-window` | 5 | window smoothing width of the arc length interpolation for boundary smoothness |
+| `--street-Label` | 11 | classification Label of points classified as roads/streets |
+| `--boundary-city` | — | city name - sets the sub-folder where outputs are stored under `outputs/` |
 
-| Input | Source | Use |
-|-------|--------|-----|
-| `preprocessed/<city>/low_featured.laz` | Brigitte's preprocessing | Geometric baseline (height, planarity, roughness) |
-| `classified/<city>_mlp_classified.laz` | Vency's classifier | Classifier-based extraction |
+---
 
-**Classification labels used (from the classifier):**
+## input
 
-| Code | Label |
-|------|-------|
-| 0 | other |
+A classified laz/las File from step 2 of the ML classification process with the following classifications:
+
+| Label | class |
+| --- | --- |
 | 2 | sidewalk |
-| 11 | street/road |
+| 11 | Street / Road |
 
-## Output
+---
 
-The candidate extraction script produces:
+## output
 
+All files are saved in `outputs//` (or `outputs/` if no city is specified).
+
+| File | description |
+| --- | --- |
+| `sidewalk_hfe.laz` | Building-side boundary line |
+| `sidewalk_KI.laz` | Kerb-side boundary line |
+| `sidewalk_centreline.laz` | centre-line of walkway (mid-point between hfe and ki) |
+| `sidewalk_boundary_all.laz` | full boundaries |
+| `sidewalk_buffer_zones.csv` | gap between Kerb and road for each strip with IFP accessibility category |
+
+---
+
+### Buffer zone categories (IFP specification)
+
+| category | gap |
+| --- | --- |
+| not present | less than 5cm |
+| Narrow | 5 - 20cm |
+| medium | 20 - 70cm |
+| wide | greater than 70cm |
+
+---
+
+## methodology
+
+This script runs a 5 Stage pipe-line:
+
+**Stage 1 - load & down sample**
+
+Reads the classified laz File, select only points classified as sidewalk (Label=2), and apply Voxel grid down sampling to reduce point density while preserving shape.
+
+**Stage 2 - noise removal**
+
+Uses connected component analysis (flood-fill with KD-trees) to remove isolated cluster(s) of points. Any cluster containing fewer than 30 points within a radius of 5 meters is discarded.
+
+**Stage 3 - Alpha shape**
+
+Uses Delaunay triangulation with circum-radius filtering to compute concave hull of sidewalk points using α = 0.3. Longer than max_edge_len are removed to avoid creating artifacts due to crossing roadways. Will fall back to convex hull if the number of edges produced by the Alpha-shapes is too small.
+
+**Stage 4 - Classification & Analysis**
+
+- `classify_boundary`: Groups Alpha-shape edges into connected components (one per sidewalk strip); then performs one-dimensional k-means clustering on each edge distance to nearest roadway. Closer cluster becomes ki; farther becomes hfe. Uses a swap guard to correct cases where assignments invert.
+- `calc_buffers`: calculates minimum distance from each ki line to the road surface; then assigns an IFP accessibility category based on that distance;
+- `compute_centrelines`: samples hfe and ki lines to equal length using arc-length interpolation; then computes mid-point between them as walking center-line.
+
+**Stage 5 - stitch & close**: Connects broken segments of boundary using greedy nearest end-point matching. Will close any near complete rings where start & end points are within close gap threshold.
+
+---
+## how this fits together
+
+This module exists between steps 2 (ML classifier) and 4 (width metrics) in the larger pipeline.
+
+```bash
+Pipeline.py
+└── classification/run_pipeline.py (step 2 - ML classifier)
+└── processing/extract_sidewalk_boundary.py (step 3 - this module)
+Outputs: sidewalk_hfe.laz, sidewalk_KI.laz -> metrics/width_metrics.py (step 4)
 ```
-outputs/<city>_sidewalk_*.laz    # Extracted sidewalk candidate points
-outputs/<city>_*_summary.txt     # Thresholds and statistics
-```
 
-The boundary extraction script produces:
+The `sidewalk_hfe.laz` and `sidewalk_KI.laz` outputs are passed directly to the width metrics module as inputs for calculation of per-segment width values.
 
-```
-outputs/sidewalk_boundary_ALL.laz    # Closed boundary polygons (label 10)
-outputs/sidewalk_HFE.laz             # Building-side lines (label 10)
-outputs/sidewalk_KI.laz              # Kerb-side lines (label 11)
-outputs/sidewalk_centreline.laz      # Walking centreline between HFE and KI (label 12)
-outputs/sidewalk_buffer_zones.csv    # Buffer width category per strip
-```
+---
+## known issues
 
-Buffer-zone categories in the CSV: Not Present / Narrow (< 20cm) / Medium (20–70cm) / Wide (> 70cm).
-
-All `.laz` outputs can be opened in [CloudCompare](https://www.cloudcompare.org/).
-
-## CLI options
-
-```
-python3 processing/extract_sidewalk_candidates.py <input.laz> [options]
-
-Options:
-  -o, --output PATH         Output .laz path
-  --use-classifier          Use ML classification labels instead of geometric filtering
-  --sidewalk-label INT      Classification code for sidewalk (default: 2)
-```
-
-```
-python3 processing/extract_sidewalk_boundary.py <input.laz> [options]
-
-Options:
-  --interactive             Real-time matplotlib preview for parameter tuning
-  --sidewalk-label INT      Classification code for sidewalk (default: 2)
-  --street-label INT        Classification code for street (default: 11)
-```
-
-## Datasets
-
-| City | Status |
-|------|--------|
-| Riga | Geometric baseline tested |
-| Utrecht | Boundary extraction tested |
-| Vilnius | Supported |
-| Bologna | Avoided where unlabelled |
-
-The geometric baseline was implemented and tested first (on Riga), with classifier integration added once classified outputs became available from Vency's module.
-
-## Current status
-
-- Geometric candidate baseline implemented and tested (Riga)
-- Classifier-based candidate extraction implemented
-- Full boundary pipeline implemented through all five stages (alpha shape, HFE/KI assignment, buffer zones, centreline, stitch & close)
-- Interactive preview mode available for parameter tuning
-
-## Notes for team
-
-- **Preprocessing (Brigitte):** The geometric baseline depends on your `low_featured.laz` output (height, planarity, roughness fields).
-- **Classification (Vency):** The main path uses your `classified/<city>_mlp_classified.laz`. The `--sidewalk-label` must match your model's output code (2).
-- **Width metrics (Sujeeth):** Your input is the boundary output from this module — the HFE and KI lines (as OBJ/LAS) and the classified sidewalk points. The buffer-zone CSV is also directly useful for your analysis.
-- **Visualisation (Aaron):** All `.laz` outputs open in CloudCompare. The boundary lines, centreline, and polygons each carry distinct labels (10, 11, 12) for easy colour separation.
+- separation of hfe and ki works best when there is high dense point cloud classification. Poor classification quality may produce overlapping boundaries rather than parallel boundaries.
+- the Alpha shape parameter (`--Alpha`) may need adjustment depending on scan density per city. More dense scans can use a higher value for Alpha shape parameter for a tighter fit.
