@@ -193,10 +193,11 @@ The workflow was tested on:
 
 | City | Notes |
 |---|---|
-| Utrecht | Stable results |
-| Bologna | Wider urban geometry |
+| Utrecht | Stable results with lower slope variation |
+| Bologna | Wider/open urban geometry |
 | Riga | Higher elevation/slope variation |
-
+| Vilnius | Additional validation with higher slope variation |
+| Warsaw | Additional validation with fewer valid segments |
 ---
 
 ## Notes
