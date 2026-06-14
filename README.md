@@ -1,6 +1,6 @@
 # Pointcloud Analysis for Pedestrian Access
 
-PIC: Team HN-677 
+By: Team HN-677 
 
 End-to-end pipeline that analyses LiDAR point cloud scans of urban streets to extract pedestrian sidewalk accessibility metrics. Developed for the International Federation of Pedestrians (IFP).
 
@@ -110,3 +110,5 @@ For detail on each stage, see the README in its module folder:
 - **Boundary extraction** — `processing/` (Ahmed)
 - **Width metrics** — `metrics/` (Sujeeth)
 - **Visualisation** — `visualisation/` (Aaron)
+
+Presentation Video: https://rmit-arc.instructuremedia.com/embed/f88017a6-71be-4d2d-8292-4b140ac1cfa2
